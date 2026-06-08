@@ -1,14 +1,9 @@
 """
 scraper/transfer_scraper.py
-Dati trasferimenti tramite API-Football (RapidAPI).
-
-Tutti i siti di notizie calcistiche bloccano richieste da IP cloud (403).
-API-Football invece è un'API ufficiale che funziona da server.
-
-Endpoint usati:
-  /v3/transfers?team=ID&season=YYYY  — trasferimenti di una squadra
+Trasferimenti ufficiali via API-Football con rate limiting corretto.
 """
 import logging
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -16,32 +11,34 @@ import httpx
 
 from config import settings
 from db.database import get_db_session
-from db.models import NewsItem, Transfer, Team
+from db.models import Transfer
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api-football-v1.p.rapidapi.com/v3"
 
-# Squadre Serie A su API-Football (ID RapidAPI)
-SERIE_A_TEAMS = {
-    489: "AC Milan", 505: "Inter", 496: "Juventus", 492: "Napoli",
-    497: "AS Roma", 487: "Lazio", 488: "Atalanta", 502: "Fiorentina",
-    867: "Bologna", 500: "Udinese", 494: "Cagliari", 486: "Parma",
-    499: "Torino", 504: "Verona", 503: "Lecce", 495: "Genoa",
-    511: "Como", 798: "Monza", 515: "Sassuolo", 514: "Cremonese",
-}
-
-# Squadre Premier League
-PREMIER_TEAMS = {
-    40: "Liverpool", 42: "Arsenal", 50: "Man City", 33: "Man United",
-    49: "Chelsea", 47: "Tottenham", 66: "Aston Villa", 51: "Brighton",
-    48: "West Ham", 46: "Leicester",
-}
-
+# Costanti usate da nlp/transfer_analyzer.py
 SOURCE_WEIGHTS = {
     "api_football_confirmed": 3.0,
     "api_football_loan": 2.0,
     "api_football_rumor": 1.5,
+}
+CONFIRMATION_PATTERNS = [
+    r"official", r"confirmed", r"completed", r"signed",
+    r"ufficiale", r"confermato", r"here we go",
+]
+RUMOR_PATTERNS = [
+    r"interest", r"linked", r"rumour", r"could",
+    r"interesse", r"piace", r"potrebbe",
+]
+
+# Solo le squadre principali — max 5 per rispettare 10 req/min
+MAIN_TEAMS = {
+    489: "AC Milan",
+    505: "Inter",
+    496: "Juventus",
+    492: "Napoli",
+    497: "AS Roma",
 }
 
 
@@ -53,51 +50,57 @@ class TransferScraper:
         }
 
     def _get(self, endpoint: str, params: dict) -> list:
-        try:
-            url = f"{BASE_URL}/{endpoint}"
-            r = httpx.get(url, headers=self.headers, params=params, timeout=15)
-            r.raise_for_status()
-            data = r.json()
-            return data.get("response", [])
-        except Exception as e:
-            logger.warning(f"API-Football error {endpoint}: {e}")
-            return []
+        """GET con retry e rispetto del rate limit."""
+        for attempt in range(2):
+            try:
+                time.sleep(7)  # 7 secondi tra chiamate = max 8 req/min (sotto il limite di 10)
+                url = f"{BASE_URL}/{endpoint}"
+                r = httpx.get(url, headers=self.headers, params=params, timeout=15)
+                if r.status_code == 429:
+                    logger.warning(f"Rate limit raggiunto, attendo 30s...")
+                    time.sleep(30)
+                    continue
+                if r.status_code == 403:
+                    logger.warning(f"403 Forbidden — piano free non permette questo endpoint")
+                    return []
+                r.raise_for_status()
+                return r.json().get("response", [])
+            except Exception as e:
+                logger.warning(f"API-Football error {endpoint} (tentativo {attempt+1}): {e}")
+                if attempt == 0:
+                    time.sleep(15)
+        return []
 
-    def get_team_transfers(self, team_id: int, season: int) -> list[dict]:
-        """Trasferimenti ufficiali di una squadra in una stagione."""
+    def get_team_transfers(self, team_id: int, season: int) -> list:
         return self._get("transfers", {"team": team_id, "season": season})
 
     def scrape_all_sources(self) -> int:
-        """
-        Scarica tutti i trasferimenti recenti da API-Football
-        e li salva come Transfer nel database.
-        """
+        """Scarica trasferimenti per le squadre principali."""
         if not settings.API_FOOTBALL_KEY:
-            logger.warning("API_FOOTBALL_KEY non configurata — skip transfer scraping")
+            logger.warning("API_FOOTBALL_KEY non configurata")
             return 0
 
         current_year = datetime.utcnow().year
-        seasons = [current_year, current_year - 1]
         count = 0
 
-        all_teams = {**SERIE_A_TEAMS, **PREMIER_TEAMS}
+        # Solo stagione corrente per minimizzare le chiamate
+        season = current_year if datetime.utcnow().month >= 6 else current_year - 1
 
-        for team_id, team_name in list(all_teams.items())[:10]:  # max 10 squadre per rispettare rate limit
-            for season in seasons:
-                transfers = self.get_team_transfers(team_id, season)
-                for item in transfers:
-                    try:
-                        saved = self._save_transfer(item, team_name)
-                        if saved:
-                            count += 1
-                    except Exception as e:
-                        logger.debug(f"Skip transfer: {e}")
+        for team_id, team_name in MAIN_TEAMS.items():
+            logger.info(f"Fetching trasferimenti {team_name} stagione {season}...")
+            transfers = self.get_team_transfers(team_id, season)
+
+            for item in transfers:
+                try:
+                    if self._save_transfer(item, team_name):
+                        count += 1
+                except Exception as e:
+                    logger.debug(f"Skip transfer: {e}")
 
         logger.info(f"Trasferimenti importati: {count}")
         return count
 
     def _save_transfer(self, item: dict, team_name: str) -> bool:
-        """Salva un trasferimento dal formato API-Football nel DB."""
         player_data = item.get("player", {})
         transfers_list = item.get("transfers", [])
 
@@ -109,7 +112,7 @@ class TransferScraper:
             return False
 
         saved = False
-        for t in transfers_list:
+        for t in transfers_list[-3:]:  # solo ultimi 3 trasferimenti per giocatore
             teams = t.get("teams", {})
             from_team = teams.get("out", {}).get("name", "")
             to_team = teams.get("in", {}).get("name", "")
@@ -119,8 +122,7 @@ class TransferScraper:
             if not to_team:
                 continue
 
-            # Determina probabilità in base al tipo
-            if transfer_type in ("Free", "Permanent", "€"):
+            if transfer_type in ("Free", "Permanent"):
                 probability = 95.0
                 status = "confirmed"
             elif transfer_type == "Loan":
@@ -130,14 +132,13 @@ class TransferScraper:
                 probability = 75.0
                 status = "advanced"
 
-            # Dettaglio
-            fee = t.get("type", "N/D")
             try:
                 date = datetime.fromisoformat(date_str).strftime("%d/%m/%Y") if date_str else "?"
             except Exception:
                 date = date_str[:10] if date_str else "?"
 
-            detail = f"Trasferimento ufficiale: {player_name} dal {from_team} al {to_team}. Tipo: {fee}. Data: {date}."
+            fee = transfer_type or "N/D"
+            detail = f"Trasferimento: {player_name} da {from_team} a {to_team}. Tipo: {fee}. Data: {date}."
 
             with get_db_session() as db:
                 from sqlalchemy import func
@@ -158,7 +159,12 @@ class TransferScraper:
                     status=status,
                     here_we_go=False,
                     detail=detail,
-                    sources=[{"source": "api_football_confirmed", "title": detail, "intensity": 0.9}],
+                    sources=[{
+                        "source": "api_football_confirmed",
+                        "title": detail,
+                        "intensity": 0.9,
+                        "published": datetime.utcnow().isoformat(),
+                    }],
                 )
                 db.add(transfer)
                 saved = True
