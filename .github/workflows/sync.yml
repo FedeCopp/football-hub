@@ -1,0 +1,34 @@
+name: Auto-sync FootballHub
+
+on:
+  schedule:
+    # Ogni giorno alle 07:00 UTC — import dati e quote
+    - cron: '0 7 * * *'
+    # Ogni giorno alle 19:00 UTC — aggiornamento pre-serale
+    - cron: '0 19 * * *'
+  workflow_dispatch:  # permette di avviarlo manualmente da GitHub
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Import partite e squadre
+        run: |
+          curl -s "${{ secrets.RAILWAY_URL }}/api/admin/import?secret=${{ secrets.SECRET_KEY }}" \
+            || echo "Import fallito, continuo"
+
+      - name: Attendi import (60 secondi)
+        run: sleep 60
+
+      - name: Sync quote bookmaker
+        run: |
+          curl -s "${{ secrets.RAILWAY_URL }}/api/admin/sync-odds?secret=${{ secrets.SECRET_KEY }}" \
+            || echo "Sync odds fallito, continuo"
+
+      - name: Ricalcola previsioni ML
+        run: |
+          curl -s "${{ secrets.RAILWAY_URL }}/api/admin/update-predictions?secret=${{ secrets.SECRET_KEY }}" \
+            || echo "Predictions fallito, continuo"
+
+      - name: Risultato
+        run: echo "Sync completato alle $(date)"
