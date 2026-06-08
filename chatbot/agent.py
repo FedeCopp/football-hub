@@ -1,8 +1,9 @@
 """
 chatbot/agent.py
-Chatbot AI — compatibile con LangChain 0.3.x
+Chatbot AI — LangChain 0.3.x + Groq (gratis)
 """
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -13,103 +14,87 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 from config import settings
 from db.database import get_db_session
-from db.models import (
-    Match, Team, Player, Lineup, LineupPlayer,
-    Transfer, Prediction, Injury, PlayerStats,
-    Competition, Odds
-)
+from db.models import Match, Team, Lineup, LineupPlayer, Transfer, Prediction, Injury, Competition
 
 logger = logging.getLogger(__name__)
 
 
-# ─── LLM Factory ─────────────────────────────────────────────
+# ── LLM Factory ──────────────────────────────────────────────
 
 def build_llm():
     provider = settings.llm_provider
     logger.info(f"LLM provider: {provider}")
-
     if provider == "groq":
         from langchain_groq import ChatGroq
-        return ChatGroq(
-            model=settings.GROQ_MODEL,
-            temperature=0.2,
-            api_key=settings.GROQ_API_KEY,
-        )
+        return ChatGroq(model=settings.GROQ_MODEL, temperature=0.2, api_key=settings.GROQ_API_KEY)
     if provider == "openai":
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0.2,
-            api_key=settings.OPENAI_API_KEY,
-        )
+        return ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=settings.OPENAI_API_KEY)
     from langchain_community.chat_models import ChatOllama
-    return ChatOllama(
-        model=settings.OLLAMA_MODEL,
-        base_url=settings.OLLAMA_BASE_URL,
-        temperature=0.2,
+    return ChatOllama(model=settings.OLLAMA_MODEL, base_url=settings.OLLAMA_BASE_URL, temperature=0.2)
+
+
+def get_system_prompt() -> str:
+    now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+    return (
+        "Sei FootballHub AI, assistente esperto di calcio italiano.\n\n"
+        "REGOLE FONDAMENTALI:\n"
+        "- Usa SEMPRE i tools per rispondere. Non usare mai la tua memoria per dati su partite, risultati, classifiche o mercato.\n"
+        "- NON mostrare mai nel testo tag come function= o XML. Esegui i tool silenziosamente e mostra solo la risposta finale.\n"
+        "- Rispondi sempre in italiano pulito e conciso. Usa emoji.\n"
+        "- Il database contiene Serie A, Champions League e Premier League stagioni 2023/24, 2024/25 e 2025/26.\n"
+        f"- Data e ora attuale: {now}\n"
     )
 
 
-# ─── Tools ───────────────────────────────────────────────────
+# ── Tools ─────────────────────────────────────────────────────
 
 @tool
 def get_today_matches(league: str = "") -> str:
-    """Partite di oggi. Se non ci sono oggi, mostra le ultime partite recenti o le prossime."""
+    """Partite di oggi. Se non ce ne sono mostra le ultime giocate o le prossime."""
     from datetime import timedelta
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     tomorrow = today + timedelta(days=1)
 
-    def format_match(m):
+    def fmt(m):
         home = m.home_team.short_name or m.home_team.name
         away = m.away_team.short_name or m.away_team.name
         d = m.kickoff.strftime("%d/%m %H:%M") if m.kickoff else "?"
         if m.status == "finished":
-            return f"✅ {home} {m.home_score}-{m.away_score} {away} ({d})"
+            return f"FINE {home} {m.home_score}-{m.away_score} {away} ({d})"
         elif m.status in ("live", "in_play"):
-            return f"🔴 {home} {m.home_score or 0}-{m.away_score or 0} {away} (LIVE)"
-        else:
-            return f"⏰ {home} vs {away} ({d})"
+            return f"LIVE {home} {m.home_score or 0}-{m.away_score or 0} {away}"
+        return f"ORE {home} vs {away} ({d})"
 
     with get_db_session() as db:
-        # Prima prova oggi
         matches = db.query(Match).filter(
             Match.kickoff >= today, Match.kickoff < tomorrow
         ).order_by(Match.kickoff).all()
-
         if matches:
-            return "📅 Partite di oggi:\n" + "\n".join(format_match(m) for m in matches)
+            return "Partite di oggi:\n" + "\n".join(fmt(m) for m in matches)
 
-        # Nessuna oggi — cerca le ultime 7 giorni
-        week_ago = today - timedelta(days=7)
         recent = db.query(Match).filter(
-            Match.kickoff >= week_ago,
+            Match.kickoff >= today - timedelta(days=7),
             Match.kickoff < today,
             Match.status == "finished"
         ).order_by(Match.kickoff.desc()).limit(10).all()
-
         if recent:
-            return "📅 Nessuna partita oggi. Ultime partite giocate:\n" + "\n".join(format_match(m) for m in recent)
+            return "Nessuna partita oggi. Ultime partite:\n" + "\n".join(fmt(m) for m in recent)
 
-        # Cerca prossime partite
-        next_matches = db.query(Match).filter(
-            Match.kickoff > tomorrow
-        ).order_by(Match.kickoff).limit(10).all()
-
-        if next_matches:
-            return "📅 Nessuna partita oggi. Prossime partite in programma:\n" + "\n".join(format_match(m) for m in next_matches)
+        nxt = db.query(Match).filter(Match.kickoff > tomorrow).order_by(Match.kickoff).limit(10).all()
+        if nxt:
+            return "Nessuna partita oggi. Prossime in programma:\n" + "\n".join(fmt(m) for m in nxt)
 
         return "Nessuna partita trovata nel database."
 
 
 @tool
 def get_lineup(team_name: str) -> str:
-    """Formazione probabile o ufficiale di una squadra. Es: get_lineup('Milan')"""
+    """Formazione probabile o ufficiale di una squadra."""
     from sqlalchemy import func, or_
     from datetime import timedelta
     with get_db_session() as db:
-        team = db.query(Team).filter(
-            func.lower(Team.name).contains(team_name.lower())
-        ).first()
+        team = db.query(Team).filter(func.lower(Team.name).contains(team_name.lower())).first()
         if not team:
             return f"Squadra '{team_name}' non trovata."
         now = datetime.utcnow()
@@ -120,43 +105,42 @@ def get_lineup(team_name: str) -> str:
         ).order_by(Match.kickoff).first()
         if not match:
             return f"Nessuna partita per {team.name} nei prossimi 7 giorni."
-        lineup = db.query(Lineup).filter_by(
-            match_id=match.id, team_id=team.id
-        ).order_by(Lineup.is_official.desc()).first()
+        lineup = db.query(Lineup).filter_by(match_id=match.id, team_id=team.id).order_by(Lineup.is_official.desc()).first()
         if not lineup:
             return f"Formazione non ancora disponibile per {team.name}."
         starters = db.query(LineupPlayer).filter_by(lineup_id=lineup.id, role="starter").all()
-        lines = [f"{'🔴 UFFICIALE' if lineup.is_official else '📋 Probabile'} — {team.name} ({lineup.formation or '?'})", ""]
+        tipo = "UFFICIALE" if lineup.is_official else "Probabile"
+        lines = [f"{tipo} - {team.name} ({lineup.formation or '?'})", ""]
         for i, lp in enumerate(starters, 1):
             name = lp.player.name if lp.player else "N/D"
-            unc = " ⚠️" if lp.is_uncertain else ""
+            unc = " (dubbio)" if lp.is_uncertain else ""
             lines.append(f"{i:2}. {name}{unc}")
         return "\n".join(lines)
 
 
 @tool
 def get_prediction(home_team: str, away_team: str) -> str:
-    """Previsione ML per una partita. Es: get_prediction('Milan', 'Inter')"""
+    """Previsione ML per una partita. Esempio: get_prediction('Milan', 'Inter')"""
     from sqlalchemy import func
     from datetime import timedelta
     with get_db_session() as db:
         home = db.query(Team).filter(func.lower(Team.name).contains(home_team.lower())).first()
         away = db.query(Team).filter(func.lower(Team.name).contains(away_team.lower())).first()
         if not home or not away:
-            return f"Squadra non trovata."
+            return "Squadra non trovata."
         now = datetime.utcnow()
         match = db.query(Match).filter(
             Match.home_team_id == home.id, Match.away_team_id == away.id,
             Match.kickoff >= now - timedelta(days=1),
-            Match.kickoff <= now + timedelta(days=30),
+            Match.kickoff <= now + timedelta(days=60),
         ).order_by(Match.kickoff).first()
         if not match:
-            return f"Nessuna partita trovata tra {home.name} e {away.name}."
+            return f"Nessuna partita imminente tra {home.name} e {away.name}."
         pred = db.query(Prediction).filter_by(match_id=match.id).first()
         if not pred:
-            return f"Previsione non ancora disponibile. Assicurati che il training ML sia stato eseguito."
+            return "Previsione non disponibile. Il modello ML deve essere addestrato prima."
         lines = [
-            f"🎯 {home.name} vs {away.name}",
+            f"Previsione: {home.name} vs {away.name}",
             f"1 {home.short_name or home.name}: {pred.prob_home:.0f}%",
             f"X Pareggio: {pred.prob_draw:.0f}%",
             f"2 {away.short_name or away.name}: {pred.prob_away:.0f}%",
@@ -171,7 +155,7 @@ def get_prediction(home_team: str, away_team: str) -> str:
 
 @tool
 def get_transfers(query: str) -> str:
-    """Rumors calciomercato. Es: get_transfers('Juventus') o get_transfers('Osimhen')"""
+    """Rumors calciomercato per giocatore o squadra."""
     from sqlalchemy import func, or_
     with get_db_session() as db:
         transfers = db.query(Transfer).filter(
@@ -185,39 +169,38 @@ def get_transfers(query: str) -> str:
             return f"Nessun rumor trovato per '{query}'."
         lines = []
         for t in transfers:
-            hwg = " 🟢 HERE WE GO!" if t.here_we_go else ""
-            lines.append(f"{'🔥' if t.probability > 70 else '💬'} {t.player_name}{hwg}: {t.from_team or '?'} → {t.to_team or '?'} ({t.probability:.0f}%)")
+            hwg = " HERE WE GO!" if t.here_we_go else ""
+            lines.append(f"{t.player_name}{hwg}: {t.from_team or '?'} -> {t.to_team or '?'} ({t.probability:.0f}%)")
             if t.detail:
-                lines.append(f"   {t.detail[:150]}")
+                lines.append(f"  {t.detail[:150]}")
         return "\n".join(lines)
 
 
 @tool
 def get_injuries(team_name: str) -> str:
-    """Infortuni attivi di una squadra. Es: get_injuries('Napoli')"""
+    """Infortuni e squalifiche attive di una squadra."""
     from sqlalchemy import func
     with get_db_session() as db:
         team = db.query(Team).filter(func.lower(Team.name).contains(team_name.lower())).first()
         if not team:
             return f"Squadra '{team_name}' non trovata."
+        from db.models import Player
         injuries = db.query(Injury).join(Player).filter(
             Player.team_id == team.id, Injury.is_active == True
         ).all()
         if not injuries:
-            return f"✅ {team.name}: nessun infortunio attivo."
-        return "\n".join(f"• {i.player.name}: {i.type} ({i.reason})" for i in injuries if i.player)
+            return f"{team.name}: nessun infortunio attivo registrato."
+        return "\n".join(f"- {i.player.name}: {i.type} ({i.reason})" for i in injuries if i.player)
 
 
 @tool
 def get_standings(competition: str) -> str:
-    """Classifica di una competizione. Es: get_standings('Serie A')"""
+    """Classifica di una competizione. Esempio: get_standings('Serie A')"""
     from sqlalchemy import func
     with get_db_session() as db:
-        comp = db.query(Competition).filter(
-            func.lower(Competition.name).contains(competition.lower())
-        ).first()
+        comp = db.query(Competition).filter(func.lower(Competition.name).contains(competition.lower())).first()
         if not comp:
-            return f"Competizione '{competition}' non trovata."
+            return f"Competizione '{competition}' non trovata nel database."
         teams = db.query(Team).join(
             Match, (Match.home_team_id == Team.id) | (Match.away_team_id == Team.id)
         ).filter(Match.competition_id == comp.id, Match.status == "finished").distinct().all()
@@ -231,38 +214,24 @@ def get_standings(competition: str) -> str:
             for m in matches:
                 gf_m = (m.home_score or 0) if m.home_team_id == team.id else (m.away_score or 0)
                 ga_m = (m.away_score or 0) if m.home_team_id == team.id else (m.home_score or 0)
-                gf += gf_m; ga += ga_m
-                if gf_m > ga_m: pts += 3
-                elif gf_m == ga_m: pts += 1
+                gf += gf_m
+                ga += ga_m
+                if gf_m > ga_m:
+                    pts += 3
+                elif gf_m == ga_m:
+                    pts += 1
             if matches:
-                standings.append({"team": team.short_name or team.name, "pts": pts, "gd": gf-ga, "played": len(matches)})
+                standings.append({"team": team.short_name or team.name, "pts": pts, "gd": gf - ga, "played": len(matches)})
         if not standings:
-            return f"Nessun dato per {comp.name}."
+            return f"Nessun dato di classifica per {comp.name}."
         standings.sort(key=lambda x: (-x["pts"], -x["gd"]))
-        return f"🏆 {comp.name}\n" + "\n".join(
-            f"{i:2}. {s['team']:<18} {s['pts']}pt ({s['played']}G)"
+        return f"Classifica {comp.name}:\n" + "\n".join(
+            f"{i:2}. {s['team']:<20} {s['pts']}pt  {s['played']}G  ({s['gd']:+d})"
             for i, s in enumerate(standings[:20], 1)
         )
 
 
-# ─── Agent ───────────────────────────────────────────────────
-
-def get_system_prompt():
-    from datetime import datetime
-    now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
-    return f"""Sei FootballHub AI, assistente esperto di calcio italiano.
-
-REGOLE IMPORTANTI:
-- Usa SEMPRE i tools per rispondere — non usare mai la tua memoria per dati su partite, risultati, classifiche o mercato
-- Non mostrare mai tag XML come <function=...> o </function> nelle risposte
-- Rispondi sempre in italiano pulito
-- Data e ora attuale: {now}
-- Il database contiene la stagione Serie A 2025/2026 appena conclusa e Champions League 2025/2026
-- Se non ci sono partite oggi, usa get_standings per mostrare la classifica finale o cerca partite recenti
-
-Capacità: partite, formazioni, previsioni ML, calciomercato, infortuni, classifiche."""
-
-SYSTEM_PROMPT = get_system_prompt()
+# ── Agent ─────────────────────────────────────────────────────
 
 ALL_TOOLS = [get_today_matches, get_lineup, get_prediction, get_transfers, get_injuries, get_standings]
 
@@ -271,10 +240,7 @@ class FootballChatbot:
     def __init__(self, session_id: str = "default"):
         self.session_id = session_id
         self.llm = build_llm()
-        self.chat_history = []   # lista di HumanMessage/AIMessage
-        self._build_executor()
-
-    def _build_executor(self):
+        self.chat_history = []
         prompt = ChatPromptTemplate.from_messages([
             ("system", get_system_prompt()),
             MessagesPlaceholder(variable_name="chat_history"),
@@ -287,38 +253,26 @@ class FootballChatbot:
             verbose=False, max_iterations=4, handle_parsing_errors=True,
         )
 
+    @staticmethod
+    def _clean(text: str) -> str:
+        text = re.sub(r"function=\w+[^\n]*", "", text)
+        text = re.sub(r"<[/]?function[^>]*>", "", text)
+        text = re.sub(r"\n\n\n+", "\n\n", text)
+        return text.strip()
+
     async def chat_async(self, message: str) -> str:
         try:
             result = await self.executor.ainvoke({
                 "input": message,
                 "chat_history": self.chat_history[-16:],
             })
-            output = result.get("output", "Non ho capito la domanda.")
-            # Rimuovi eventuali tag function rimasti nel testo
-            output = self._clean_output(output)
+            output = self._clean(result.get("output", "Non ho capito la domanda."))
             self.chat_history.append(HumanMessage(content=message))
             self.chat_history.append(AIMessage(content=output))
             return output
         except Exception as e:
             logger.error(f"Chat error [{self.session_id}]: {e}")
             return f"Errore temporaneo: {str(e)[:150]}"
-
-    @staticmethod
-    def _clean_output(text: str) -> str:
-        """Rimuove tag function/tool call rimasti nel testo della risposta."""
-        import re
-        # Rimuovi blocchi <function=...>...</function>
-        text = re.sub(r'<function=[^>]+>\{[^}]*\}\s*</function>', '', text)
-        # Rimuovi function=xxx{"..."}
-        text = re.sub(r'function=\w+\{[^}]*\}', '', text)
-        # Rimuovi tag XML generici rimasti
-        text = re.sub(r'</?function[^>]*>', '', text)
-        # Rimuovi righe vuote multiple
-        text = re.sub(r'
-{3,}', '
-
-', text)
-        return text.strip()
 
     def clear_history(self):
         self.chat_history = []
