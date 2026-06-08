@@ -1,0 +1,99 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: fh_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: footballhub
+      POSTGRES_PASSWORD: footballhub_pass
+      POSTGRES_DB: footballhub
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U footballhub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ───────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: fh_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── FastAPI Backend ─────────────────────────────────────────
+  api:
+    build: .
+    container_name: fh_api
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Celery Worker ───────────────────────────────────────────
+  worker:
+    build: .
+    container_name: fh_worker
+    restart: unless-stopped
+    command: celery -A tasks worker --loglevel=info --concurrency=4
+    env_file: .env
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+      - postgres
+
+  # ── Celery Beat (scheduler) ─────────────────────────────────
+  beat:
+    build: .
+    container_name: fh_beat
+    restart: unless-stopped
+    command: celery -A tasks beat --loglevel=info --scheduler celery.beat.PersistentScheduler
+    env_file: .env
+    volumes:
+      - .:/app
+      - beat_data:/app/celerybeat-schedule
+    depends_on:
+      - redis
+      - worker
+
+  # ── Flower (monitor Celery tasks) ───────────────────────────
+  flower:
+    build: .
+    container_name: fh_flower
+    restart: unless-stopped
+    command: celery -A tasks flower --port=5555
+    env_file: .env
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+      - worker
+
+volumes:
+  postgres_data:
+  redis_data:
+  beat_data:

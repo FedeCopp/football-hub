@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Football Intelligence Hub</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800&family=Barlow:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0c10;--bg2:#111318;--bg3:#181b22;--bg4:#1e222b;--card:#13161d;--border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.12);--text:#f0f2f5;--muted:#7a8090;--dim:#4a5060;--green:#00e676;--green2:#1de9b6;--amber:#ffd740;--red:#ff5252;--blue:#448aff;--purple:#e040fb;--acc:#00e676}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;font-size:15px;line-height:1.6;min-height:100vh}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:var(--bg2)}::-webkit-scrollbar-thumb{background:var(--dim);border-radius:2px}
+.nav{position:sticky;top:0;z-index:100;background:rgba(10,12,16,0.94);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;height:56px;gap:6px}
+.nav-logo{font-family:'Barlow Condensed',sans-serif;font-size:21px;font-weight:800;color:var(--acc);margin-right:12px;white-space:nowrap}
+.nav-logo span{color:var(--text)}
+.nav-tabs{display:flex;gap:2px;flex:1;overflow-x:auto}
+.nav-tab{padding:6px 14px;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;color:var(--muted);transition:all .15s;border:none;background:none;white-space:nowrap}
+.nav-tab:hover{color:var(--text);background:var(--bg3)}
+.nav-tab.active{color:var(--acc);background:rgba(0,230,118,0.08)}
+.nav-live{margin-left:auto;display:flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:var(--red);white-space:nowrap}
+.live-dot{width:7px;height:7px;border-radius:50%;background:var(--red);animation:pulse 1.4s infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(1.3)}}
+.page{display:none;padding:20px;max-width:1280px;margin:0 auto}
+.page.active{display:block;animation:fadeUp .2s ease}
+@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.section-title{font-family:'Barlow Condensed',sans-serif;font-size:26px;font-weight:800;text-transform:uppercase;letter-spacing:.02em;margin-bottom:18px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px}
+.card:hover{border-color:var(--border2)}
+.card-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:12px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+.badge-green{background:rgba(0,230,118,.12);color:var(--green)}
+.badge-amber{background:rgba(255,215,64,.12);color:var(--amber)}
+.badge-red{background:rgba(255,82,82,.12);color:var(--red)}
+.badge-blue{background:rgba(68,138,255,.12);color:var(--blue)}
+.badge-dim{background:var(--bg3);color:var(--muted)}
+.stat-row{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border)}
+.stat-row:last-child{border-bottom:none}
+.stat-label{font-size:13px;color:var(--muted)}
+.stat-val{font-size:14px;font-weight:600}
+.prog{height:5px;background:var(--bg3);border-radius:99px;overflow:hidden;margin:5px 0}
+.prog-fill{height:100%;border-radius:99px;transition:width .6s cubic-bezier(.4,0,.2,1)}
+.metric{background:var(--bg2);border-radius:8px;padding:12px 14px}
+.metric-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:3px}
+.metric-val{font-size:24px;font-weight:700;font-family:'Barlow Condensed',sans-serif}
+.metric-val.green{color:var(--green)}.metric-val.amber{color:var(--amber)}.metric-val.red{color:var(--red)}
+.match-card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;cursor:pointer;transition:border-color .15s,transform .1s;margin-bottom:10px}
+.match-card:hover{border-color:rgba(0,230,118,.3);transform:translateY(-1px)}
+.match-card.selected{border-color:var(--acc)}
+.match-header{display:flex;align-items:center;padding:8px 16px;background:var(--bg3);border-bottom:1px solid var(--border);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.match-body{display:flex;align-items:center;padding:16px 20px;gap:16px}
+.team-block{flex:1}
+.team-name{font-family:'Barlow Condensed',sans-serif;font-size:21px;font-weight:700;text-transform:uppercase;letter-spacing:.03em}
+.team-form{display:flex;gap:3px;margin-top:4px}
+.form-dot{width:14px;height:14px;border-radius:2px;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.form-w{background:rgba(0,230,118,.2);color:var(--green)}.form-d{background:rgba(255,215,64,.15);color:var(--amber)}.form-l{background:rgba(255,82,82,.15);color:var(--red)}
+.vs-block{text-align:center;min-width:70px}
+.vs-time{font-family:'Barlow Condensed',sans-serif;font-size:26px;font-weight:800;color:var(--acc)}
+.odds-bar{display:flex;border-radius:6px;overflow:hidden;height:28px;margin-top:10px}
+.odds-seg{display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;transition:flex .5s ease}
+.odds-1{background:rgba(68,138,255,.25);color:var(--blue)}.odds-x{background:rgba(255,215,64,.2);color:var(--amber)}.odds-2{background:rgba(255,82,82,.22);color:var(--red)}
+.info-label{font-size:11px;color:var(--dim);margin-top:4px;font-style:italic}
+.pitch{background:linear-gradient(180deg,#0d2818 0%,#0a1f12 100%);border-radius:10px;position:relative;width:100%;padding-bottom:140%;border:1px solid rgba(0,200,80,.15);overflow:hidden}
+.pitch-inner{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:space-between;padding:14px 6px}
+.player-row{display:flex;justify-content:space-around;align-items:center}
+.player-dot{display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer}
+.player-circle{width:32px;height:32px;border-radius:50%;background:rgba(0,230,118,.15);border:2px solid var(--acc);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:var(--acc);transition:all .15s}
+.player-dot:hover .player-circle{background:rgba(0,230,118,.3);transform:scale(1.1)}
+.player-name{font-size:8px;font-weight:600;color:#d0f0e0;text-align:center;white-space:nowrap}
+.uncertain .player-circle{border-color:var(--amber);color:var(--amber);background:rgba(255,215,64,.1)}
+.uncertain .player-name{color:var(--amber)}
+.transfer-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:10px;position:relative;overflow:hidden}
+.transfer-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--acc)}
+.transfer-card.hot::before{background:var(--red);animation:glow-red 2s infinite}
+.transfer-card.warm::before{background:var(--amber)}
+@keyframes glow-red{0%,100%{box-shadow:0 0 4px var(--red)}50%{box-shadow:0 0 12px var(--red)}}
+.prob-ring{position:relative;width:60px;height:60px;flex-shrink:0}
+.prob-num{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'Barlow Condensed',sans-serif;font-size:17px;font-weight:800}
+.score-opt{padding:7px 14px;border-radius:8px;background:var(--bg3);border:1px solid var(--border);font-family:'Barlow Condensed',sans-serif;font-size:17px;font-weight:700;text-align:center;cursor:default}
+.score-opt.top{border-color:var(--acc);background:rgba(0,230,118,.08)}
+.score-pct{font-size:11px;font-weight:600;color:var(--muted);font-family:'Barlow',sans-serif;display:block}
+.filter-row{display:flex;gap:7px;margin-bottom:18px;flex-wrap:wrap;align-items:center}
+.filter-btn{padding:5px 13px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;border:1px solid var(--border);background:var(--bg3);color:var(--muted)}
+.filter-btn.active{border-color:rgba(0,230,118,.4);color:var(--acc);background:rgba(0,230,118,.06)}
+.filter-btn:hover{color:var(--text);border-color:var(--border2)}
+.search-input{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:6px 11px;color:var(--text);font-family:'Barlow',sans-serif;font-size:13px;outline:none;width:180px}
+.search-input:focus{border-color:rgba(0,230,118,.3)}
+.search-input::placeholder{color:var(--dim)}
+.inner-tabs{display:flex;gap:3px;margin-bottom:18px;border-bottom:1px solid var(--border)}
+.inner-tab{padding:8px 15px;font-size:13px;font-weight:500;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;transition:all .15s;margin-bottom:-1px}
+.inner-tab.active{color:var(--acc);border-bottom-color:var(--acc)}
+.inner-panel{display:none}.inner-panel.active{display:block}
+.chat-wrap{display:flex;flex-direction:column;height:calc(100vh - 56px)}
+.chat-messages{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:12px}
+.msg{max-width:700px}
+.msg.user{margin-left:auto}
+.msg-bubble{padding:11px 15px;border-radius:12px;font-size:14px;line-height:1.6;white-space:pre-wrap}
+.msg.bot .msg-bubble{background:var(--bg3);border:1px solid var(--border);border-radius:12px 12px 12px 4px}
+.msg.user .msg-bubble{background:rgba(0,230,118,.12);border:1px solid rgba(0,230,118,.2);border-radius:12px 12px 4px 12px}
+.msg-meta{font-size:11px;color:var(--dim);margin-bottom:4px;padding:0 4px}
+.chat-input-wrap{padding:14px;border-top:1px solid var(--border);display:flex;gap:9px;align-items:flex-end}
+.chat-input{flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:10px 13px;color:var(--text);font-family:'Barlow',sans-serif;font-size:14px;resize:none;outline:none;transition:border-color .15s;max-height:120px}
+.chat-input:focus{border-color:rgba(0,230,118,.4)}
+.chat-send{background:var(--acc);border:none;border-radius:10px;width:40px;height:40px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s;flex-shrink:0}
+.chat-send:hover{background:var(--green2)}
+.chat-send:disabled{background:var(--dim);cursor:not-allowed}
+.quick-btns{display:flex;gap:7px;padding:0 14px 10px;flex-wrap:wrap}
+.quick-btn{padding:4px 11px;border-radius:99px;background:var(--bg3);border:1px solid var(--border);font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;transition:all .15s}
+.quick-btn:hover{border-color:rgba(0,230,118,.3);color:var(--acc);background:rgba(0,230,118,.06)}
+.typing{display:flex;gap:4px;padding:8px 12px}
+.typing span{width:6px;height:6px;border-radius:50%;background:var(--dim);animation:bounce 1.2s infinite}
+.typing span:nth-child(2){animation-delay:.2s}.typing span:nth-child(3){animation-delay:.4s}
+@keyframes bounce{0%,80%,100%{transform:translateY(0)}40%{transform:translateY(-6px)}}
+.api-notice{background:rgba(255,215,64,.05);border:1px solid rgba(255,215,64,.2);border-radius:10px;padding:14px 18px;margin-bottom:18px;font-size:13px;color:var(--muted);line-height:1.7}
+.api-notice strong{color:var(--amber)}
+.api-notice code{background:var(--bg3);padding:1px 5px;border-radius:3px;font-size:12px;color:var(--text);font-family:monospace}
+.divider{height:1px;background:var(--border);margin:18px 0}
+.setup-row{display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border)}
+.setup-row:last-child{border-bottom:none}
+.setup-key{font-size:13px;color:var(--muted)}
+.setup-input{background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:5px 9px;color:var(--text);font-size:12px;width:200px;outline:none;font-family:monospace}
+.setup-input:focus{border-color:rgba(0,230,118,.3)}
+.btn-primary{background:rgba(0,230,118,.1);border:1px solid rgba(0,230,118,.3);color:var(--acc);border-radius:7px;padding:8px 18px;cursor:pointer;font-size:13px;font-weight:600;transition:all .15s}
+.btn-primary:hover{background:rgba(0,230,118,.18)}
+.loading{display:flex;align-items:center;gap:10px;padding:30px;color:var(--muted);font-size:14px}
+.spinner{width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.error-msg{background:rgba(255,82,82,.08);border:1px solid rgba(255,82,82,.2);border-radius:8px;padding:12px 16px;color:var(--red);font-size:13px;margin-bottom:14px}
+@media(max-width:900px){.grid3{grid-template-columns:1fr 1fr}.grid4{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){.grid2,.grid3,.grid4{grid-template-columns:1fr}.nav-tab{padding:6px 9px;font-size:11px}}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-logo">⚽ <span>FOOTBALL</span>HUB</div>
+  <div class="nav-tabs">
+    <button class="nav-tab active" onclick="showPage('matches')">Partite</button>
+    <button class="nav-tab" onclick="showPage('lineup')">Formazioni</button>
+    <button class="nav-tab" onclick="showPage('transfers')">Mercato</button>
+    <button class="nav-tab" onclick="showPage('predictions')">Previsioni</button>
+    <button class="nav-tab" onclick="showPage('chat')">Chat AI</button>
+    <button class="nav-tab" onclick="showPage('setup')">Setup</button>
+  </div>
+  <div class="nav-live"><div class="live-dot"></div> <span id="conn-label">OFFLINE</span></div>
+</nav>
+
+<!-- ═══════════════════ MATCHES ═══════════════════ -->
+<div id="page-matches" class="page active">
+  <div class="section-title">Partite</div>
+  <div class="filter-row">
+    <button class="filter-btn active" onclick="setMatchFilter(this,'all')">Tutte</button>
+    <button class="filter-btn" onclick="setMatchFilter(this,'live')">🔴 Live</button>
+    <button class="filter-btn" onclick="setMatchFilter(this,'today')">Oggi</button>
+    <input class="search-input" id="match-search" placeholder="Cerca squadra…" oninput="filterMatchList()">
+    <button class="filter-btn" style="margin-left:auto" onclick="loadMatches()">⟳ Aggiorna</button>
+  </div>
+  <div id="matches-container"><div class="loading"><div class="spinner"></div>Caricamento partite…</div></div>
+</div>
+
+<!-- ═══════════════════ LINEUP ═══════════════════ -->
+<div id="page-lineup" class="page">
+  <div class="section-title">Formazioni</div>
+  <div class="inner-tabs">
+    <div class="inner-tab active" onclick="innerTab(this,'tab-probable')">Probabili</div>
+    <div class="inner-tab" onclick="innerTab(this,'tab-official')">🔴 Ufficiali</div>
+    <div class="inner-tab" onclick="innerTab(this,'tab-injuries')">Infortuni</div>
+  </div>
+  <div id="tab-probable" class="inner-panel active">
+    <div id="lineup-match-select" class="filter-row"></div>
+    <div id="lineup-display"><div class="loading"><div class="spinner"></div>Seleziona una partita…</div></div>
+  </div>
+  <div id="tab-official" class="inner-panel">
+    <div id="official-container"><div style="color:var(--muted);padding:20px;font-size:14px;text-align:center">Le formazioni ufficiali vengono rilasciate ~60min prima del fischio.<br>Il pannello si aggiorna automaticamente via WebSocket quando disponibili.</div></div>
+  </div>
+  <div id="tab-injuries" class="inner-panel">
+    <div id="injuries-container"><div class="loading"><div class="spinner"></div>Caricamento infortuni…</div></div>
+  </div>
+</div>
+
+<!-- ═══════════════════ TRANSFERS ═══════════════════ -->
+<div id="page-transfers" class="page">
+  <div class="section-title">Calciomercato</div>
+  <div class="filter-row">
+    <button class="filter-btn active" onclick="setTransferFilter(this,'all')">Tutti</button>
+    <button class="filter-btn" onclick="setTransferFilter(this,'hot')">🔥 Caldi</button>
+    <button class="filter-btn" onclick="setTransferFilter(this,'confirmed')">✅ Confermati</button>
+    <input class="search-input" id="transfer-search" placeholder="Cerca giocatore o club…" oninput="filterTransferList()">
+    <button class="filter-btn" style="margin-left:auto" onclick="loadTransfers()">⟳ Aggiorna</button>
+  </div>
+  <div class="grid4" style="margin-bottom:14px">
+    <div class="metric"><div class="metric-label">Rumors attivi</div><div class="metric-val green" id="t-total">—</div></div>
+    <div class="metric"><div class="metric-label">Here we go</div><div class="metric-val amber" id="t-hwg">—</div></div>
+    <div class="metric"><div class="metric-label">Confermati</div><div class="metric-val" id="t-conf">—</div></div>
+    <div class="metric"><div class="metric-label">Ultima news</div><div class="metric-val" style="font-size:14px" id="t-last">—</div></div>
+  </div>
+  <div id="transfers-container"><div class="loading"><div class="spinner"></div>Caricamento rumors…</div></div>
+</div>
+
+<!-- ═══════════════════ PREDICTIONS ═══════════════════ -->
+<div id="page-predictions" class="page">
+  <div class="section-title">Previsioni</div>
+  <div id="pred-match-select" class="filter-row"></div>
+  <div id="pred-container"><div style="color:var(--muted);padding:20px;font-size:14px">Seleziona una partita per vedere la previsione ML.</div></div>
+</div>
+
+<!-- ═══════════════════ CHAT ═══════════════════ -->
+<div id="page-chat" class="page" style="padding:0">
+  <div class="chat-wrap">
+    <div class="chat-messages" id="chat-messages">
+      <div class="msg bot">
+        <div class="msg-meta">FootballHub AI</div>
+        <div class="msg-bubble">Ciao! Sono il tuo assistente calcistico. Interrogo il database in tempo reale per formazioni, previsioni e rumors di mercato.\n\nCosa vuoi sapere?</div>
+      </div>
+    </div>
+    <div class="quick-btns">
+      <button class="quick-btn" onclick="quickChat('Quali partite ci sono oggi?')">⚽ Partite oggi</button>
+      <button class="quick-btn" onclick="quickChat('Formazione Milan stasera')">📋 Formazione Milan</button>
+      <button class="quick-btn" onclick="quickChat('Rumors calciomercato Juventus')">🔄 Mercato Juve</button>
+      <button class="quick-btn" onclick="quickChat('Previsione Inter vs Napoli')">🎯 Previsione</button>
+      <button class="quick-btn" onclick="quickChat('Chi è infortunato nell Inter?')">🤕 Infortuni</button>
+    </div>
+    <div class="chat-input-wrap">
+      <textarea class="chat-input" id="chat-input" placeholder="Chiedi qualcosa…" rows="1" onkeydown="chatKey(event)" oninput="autoResize(this)"></textarea>
+      <button class="chat-send" id="chat-btn" onclick="sendChat()">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════ SETUP ═══════════════════ -->
+<div id="page-setup" class="page">
+  <div class="section-title">Setup</div>
+  <div class="grid2" style="margin-bottom:16px">
+    <div class="card">
+      <div class="card-title">🔌 Connessione Backend</div>
+      <div class="setup-row">
+        <span class="setup-key">URL Backend Python</span>
+        <input class="setup-input" id="cfg-url" placeholder="http://localhost:8000">
+      </div>
+      <div class="setup-row">
+        <span class="setup-key">Stato</span>
+        <span id="cfg-status" class="badge badge-dim">Non testato</span>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button class="btn-primary" onclick="testConnection()">Testa connessione</button>
+        <button class="btn-primary" onclick="saveConfig()">Salva</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">📡 Stato Servizi</div>
+      <div class="setup-row"><span class="setup-key">Database</span><span id="svc-db" class="badge badge-dim">—</span></div>
+      <div class="setup-row"><span class="setup-key">Celery Worker</span><span id="svc-worker" class="badge badge-dim">—</span></div>
+      <div class="setup-row"><span class="setup-key">WebSocket</span><span id="svc-ws" class="badge badge-dim">—</span></div>
+      <div class="setup-row"><span class="setup-key">Ultimo aggiornamento dati</span><span id="svc-last" style="font-size:12px;color:var(--muted)">—</span></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">⚙️ Azioni Amministrative</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:4px">
+      <button class="btn-primary" onclick="adminAction('import')">📥 Import dati storici</button>
+      <button class="btn-primary" onclick="adminAction('sync-odds')">💹 Sync quote</button>
+      <button class="btn-primary" onclick="adminAction('update-predictions')">🎯 Ricalcola previsioni</button>
+    </div>
+    <div id="admin-log" style="margin-top:12px;font-size:12px;color:var(--muted);font-family:monospace;line-height:1.8"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">📋 Avvio rapido</div>
+    <div style="background:var(--bg2);border-radius:8px;padding:14px;font-family:monospace;font-size:12px;color:#a8d8a8;line-height:2;overflow-x:auto;margin-top:6px">
+      cp .env.example .env &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--dim)"># configura le API key</span><br>
+      docker-compose up -d &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--dim)"># avvia tutto</span><br>
+      <span style="color:var(--dim)"># Prima volta: importa dati storici (pulsante sopra)</span><br>
+      python ml/train.py &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--dim)"># addestra ML</span>
+    </div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════
+// CONFIG & STATE
+// ══════════════════════════════════════════════════════
+let API_BASE = localStorage.getItem('fh_api') || 'http://localhost:8000';
+let WS = null;
+let chatSessionId = '';
+let allMatches = [], allTransfers = [];
+let matchFilter = 'all', transferFilter = 'all';
+
+// ── Init ──────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = localStorage.getItem('fh_api');
+  if (saved) { document.getElementById('cfg-url').value = saved; API_BASE = saved; }
+  connectWS();
+  loadMatches();
+  loadTransfers();
+  loadInjuries();
+});
+
+// ══════════════════════════════════════════════════════
+// NAVIGATION
+// ══════════════════════════════════════════════════════
+function showPage(id) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('page-' + id).classList.add('active');
+  event.target.classList.add('active');
+  if (id === 'lineup') buildLineupMatchSelect();
+  if (id === 'predictions') buildPredMatchSelect();
+}
+function innerTab(el, id) {
+  const wrap = el.closest('.page');
+  wrap.querySelectorAll('.inner-tab').forEach(t => t.classList.remove('active'));
+  wrap.querySelectorAll('.inner-panel').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById(id).classList.add('active');
+}
+
+// ══════════════════════════════════════════════════════
+// API CALLS
+// ══════════════════════════════════════════════════════
+async function api(path, opts = {}) {
+  try {
+    const res = await fetch(API_BASE + path, { ...opts, headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (e) {
+    console.warn('API error', path, e.message);
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════════════════
+// WEBSOCKET
+// ══════════════════════════════════════════════════════
+function connectWS() {
+  const wsUrl = API_BASE.replace('http', 'ws') + '/ws';
+  try {
+    WS = new WebSocket(wsUrl);
+    WS.onopen = () => {
+      document.getElementById('conn-label').textContent = 'LIVE';
+      document.querySelector('.live-dot').style.background = 'var(--green)';
+      document.getElementById('svc-ws').textContent = 'Connesso';
+      document.getElementById('svc-ws').className = 'badge badge-green';
+      setInterval(() => WS && WS.readyState === 1 && WS.send('ping'), 30000);
+    };
+    WS.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg === 'pong') return;
+        handleWSMessage(msg);
+      } catch {}
+    };
+    WS.onclose = () => {
+      document.getElementById('conn-label').textContent = 'OFFLINE';
+      document.querySelector('.live-dot').style.background = 'var(--red)';
+      document.getElementById('svc-ws').textContent = 'Disconnesso';
+      document.getElementById('svc-ws').className = 'badge badge-red';
+      setTimeout(connectWS, 5000);
+    };
+    WS.onerror = () => WS.close();
+  } catch(e) { setTimeout(connectWS, 5000); }
+}
+
+function handleWSMessage(msg) {
+  if (msg.type === 'live_update') {
+    loadMatches();
+    document.getElementById('svc-last').textContent = new Date().toLocaleTimeString('it');
+  }
+  if (msg.type === 'official_lineups') {
+    const active = document.getElementById('page-lineup').classList.contains('active');
+    if (active) buildLineupMatchSelect();
+    showToast('✅ Formazioni ufficiali disponibili!');
+  }
+  if (msg.type === 'new_transfer') {
+    loadTransfers();
+    showToast('🔄 Nuovo rumor di mercato!');
+  }
+}
+
+function showToast(msg) {
+  const t = document.createElement('div');
+  t.textContent = msg;
+  Object.assign(t.style, { position:'fixed', bottom:'20px', right:'20px', background:'var(--bg3)', border:'1px solid var(--border2)', borderRadius:'8px', padding:'10px 16px', fontSize:'13px', zIndex:9999, animation:'fadeUp .3s ease' });
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3500);
+}
+
+// ══════════════════════════════════════════════════════
+// MATCHES
+// ══════════════════════════════════════════════════════
+async function loadMatches() {
+  const data = await api('/api/matches?date_from=' + getDateStr(0) + '&date_to=' + getDateStr(7));
+  if (!data) { document.getElementById('matches-container').innerHTML = '<div class="error-msg">Backend non raggiungibile. Configura l\'URL nella sezione Setup.</div>'; return; }
+  allMatches = data;
+  renderMatches();
+}
+
+function renderMatches() {
+  let list = [...allMatches];
+  if (matchFilter === 'live') list = list.filter(m => m.status === 'live' || m.status === 'in_play');
+  if (matchFilter === 'today') {
+    const today = new Date().toISOString().split('T')[0];
+    list = list.filter(m => m.kickoff && m.kickoff.startsWith(today));
+  }
+  const q = document.getElementById('match-search').value.toLowerCase();
+  if (q) list = list.filter(m => m.home.name.toLowerCase().includes(q) || m.away.name.toLowerCase().includes(q));
+
+  if (!list.length) { document.getElementById('matches-container').innerHTML = '<div style="color:var(--muted);padding:20px;font-size:14px">Nessuna partita trovata.</div>'; return; }
+
+  document.getElementById('matches-container').innerHTML = list.map(m => {
+    const kickoff = m.kickoff ? new Date(m.kickoff).toLocaleTimeString('it', {hour:'2-digit',minute:'2-digit'}) : '—';
+    const isLive = ['live','in_play'].includes(m.status);
+    const isFinished = m.status === 'finished';
+    const formH = (m.form?.home || []).map(f => `<div class="form-dot form-${f.toLowerCase()}">${f}</div>`).join('');
+    const formA = (m.form?.away || []).map(f => `<div class="form-dot form-${f.toLowerCase()}">${f}</div>`).join('');
+    const ph = m.odds?.impl_home || 33, pd = m.odds?.impl_draw || 33, pa = m.odds?.impl_away || 33;
+    const centerContent = isFinished ? `<div class="vs-time">${m.score.home}-${m.score.away}</div><div style="font-size:10px;color:var(--muted)">FT</div>`
+      : isLive ? `<div class="vs-time" style="color:var(--red)">${m.score.home||0}-${m.score.away||0}</div><div style="font-size:10px;color:var(--red)">LIVE</div>`
+      : `<div class="vs-time">${kickoff}</div><div style="font-size:10px;color:var(--muted)">VS</div>`;
+    return `<div class="match-card" onclick="openMatchPred(${m.id})">
+      <div class="match-header">
+        <span>${m.competition}</span>
+        ${isLive ? '<span class="badge badge-red" style="margin-left:6px">● LIVE</span>' : ''}
+        <span style="margin-left:auto;font-size:10px">${m.kickoff ? new Date(m.kickoff).toLocaleDateString('it',{day:'numeric',month:'short'}) : ''}</span>
+      </div>
+      <div class="match-body">
+        <div class="team-block"><div class="team-name">${m.home.short||m.home.name}</div><div class="team-form">${formH}</div></div>
+        <div class="vs-block">${centerContent}</div>
+        <div class="team-block" style="text-align:right"><div class="team-name">${m.away.short||m.away.name}</div><div class="team-form" style="justify-content:flex-end">${formA}</div></div>
+      </div>
+      <div style="padding:0 20px 12px">
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:3px">
+          <span>1 · ${Math.round(ph)}%${m.odds?.home_win?' ('+m.odds.home_win.toFixed(2)+')':''}</span>
+          <span>X · ${Math.round(pd)}%</span>
+          <span>2 · ${Math.round(pa)}%${m.odds?.away_win?' ('+m.odds.away_win.toFixed(2)+')':''}</span>
+        </div>
+        <div class="odds-bar">
+          <div class="odds-seg odds-1" style="flex:${Math.round(ph)}">${Math.round(ph)}%</div>
+          <div class="odds-seg odds-x" style="flex:${Math.round(pd)}">${Math.round(pd)}%</div>
+          <div class="odds-seg odds-2" style="flex:${Math.round(pa)}">${Math.round(pa)}%</div>
+        </div>
+        <div class="info-label">Prob. ML + quote bookmaker come feature calibrativa</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function setMatchFilter(btn, f) {
+  document.querySelectorAll('#page-matches .filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active'); matchFilter = f; renderMatches();
+}
+function filterMatchList() { renderMatches(); }
+
+function openMatchPred(id) {
+  showPage('predictions'); document.querySelectorAll('.nav-tab')[3].classList.add('active');
+  document.querySelectorAll('.nav-tab').forEach((t,i) => { if(i!==3) t.classList.remove('active'); });
+  buildPredMatchSelect(); loadPrediction(id);
+  document.querySelectorAll('#pred-match-select .filter-btn').forEach(b => { b.classList.toggle('active', parseInt(b.dataset.id)===id); });
+}
+
+// ══════════════════════════════════════════════════════
+// LINEUPS
+// ══════════════════════════════════════════════════════
+function buildLineupMatchSelect() {
+  const upcoming = allMatches.filter(m => m.status !== 'finished').slice(0, 8);
+  const sel = document.getElementById('lineup-match-select');
+  if (!upcoming.length) { sel.innerHTML = '<span style="color:var(--muted);font-size:13px">Nessuna partita imminente</span>'; return; }
+  sel.innerHTML = upcoming.map(m =>
+    `<button class="filter-btn" data-id="${m.id}" onclick="loadLineup(${m.id},this)">${m.home.short||m.home.name} vs ${m.away.short||m.away.name}</button>`
+  ).join('');
+}
+
+async function loadLineup(matchId, btn) {
+  document.querySelectorAll('#lineup-match-select .filter-btn').forEach(b => b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  document.getElementById('lineup-display').innerHTML = '<div class="loading"><div class="spinner"></div>Caricamento formazioni…</div>';
+  const data = await api(`/api/matches/${matchId}/lineups`);
+  if (!data || !data.length) { document.getElementById('lineup-display').innerHTML = '<div style="color:var(--muted);padding:20px;font-size:14px">Formazioni non ancora disponibili per questa partita.</div>'; return; }
+  renderLineups(data, matchId);
+}
+
+function renderLineups(lineups, matchId) {
+  const match = allMatches.find(m => m.id === matchId);
+  const html = `<div class="grid2">
+    ${lineups.map(l => `
+      <div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+          <div style="font-family:'Barlow Condensed',sans-serif;font-size:24px;font-weight:800">${l.team_name}</div>
+          <span class="badge badge-dim">${l.formation||'?'}</span>
+          <span class="badge ${l.is_official?'badge-red':'badge-amber'}">${l.is_official?'UFFICIALE':'PROBABILE'}</span>
+          <span style="margin-left:auto;font-size:11px;color:var(--muted)">${l.fetched_at ? new Date(l.fetched_at).toLocaleTimeString('it',{hour:'2-digit',minute:'2-digit'}) : ''}</span>
+        </div>
+        <div class="pitch">
+          <svg style="position:absolute;inset:0;width:100%;height:100%" viewBox="0 0 100 140">
+            <rect x="5" y="5" width="90" height="130" fill="none" stroke="rgba(0,200,80,.1)" stroke-width=".5"/>
+            <line x1="5" y1="70" x2="95" y2="70" stroke="rgba(0,200,80,.1)" stroke-width=".5"/>
+            <circle cx="50" cy="70" r="14" fill="none" stroke="rgba(0,200,80,.08)" stroke-width=".5"/>
+            <rect x="25" y="5" width="50" height="18" fill="none" stroke="rgba(0,200,80,.08)" stroke-width=".5"/>
+            <rect x="25" y="117" width="50" height="18" fill="none" stroke="rgba(0,200,80,.08)" stroke-width=".5"/>
+          </svg>
+          <div class="pitch-inner">
+            ${buildPitchRows(l.starters, l.formation)}
+          </div>
+        </div>
+        <div class="card" style="margin-top:10px">
+          ${l.starters.map(p => `<div class="stat-row"><span class="stat-label"><span style="color:var(--dim);margin-right:6px;font-family:'Barlow Condensed',sans-serif">${p.number||'?'}</span>${p.name}</span>${p.uncertain?'<span class="badge badge-amber">Dubbio</span>':'<span style="color:var(--muted);font-size:12px">✓</span>'}</div>`).join('')}
+        </div>
+      </div>
+    `).join('')}
+  </div>`;
+  document.getElementById('lineup-display').innerHTML = html;
+}
+
+function buildPitchRows(starters, formation) {
+  const fmParts = (formation || '4-3-3').split('-').map(Number);
+  const rows = [];
+  // GK
+  rows.push(starters.slice(0, 1));
+  let idx = 1;
+  fmParts.forEach(n => { rows.push(starters.slice(idx, idx + n)); idx += n; });
+  return rows.map(row => `
+    <div class="player-row">
+      ${row.map(p => `<div class="player-dot ${p.uncertain?'uncertain':''}">
+        <div class="player-circle">${p.number||'?'}</div>
+        <div class="player-name">${(p.name||'').split(' ').pop()}</div>
+      </div>`).join('')}
+    </div>`).join('');
+}
+
+async function loadInjuries() {
+  const data = await api('/api/injuries?active_only=true');
+  if (!data) { document.getElementById('injuries-container').innerHTML = '<div class="error-msg">Dati infortuni non disponibili.</div>'; return; }
+  if (!data.length) { document.getElementById('injuries-container').innerHTML = '<div style="color:var(--muted);padding:20px;font-size:14px">Nessun infortunio registrato.</div>'; return; }
+  document.getElementById('injuries-container').innerHTML = data.map(i => `
+    <div class="card" style="margin-bottom:10px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div>
+          <div style="font-weight:600;font-size:15px">${i.player}</div>
+          <div style="font-size:12px;color:var(--muted)">${i.team} · ${i.reason}</div>
+        </div>
+        <div style="margin-left:auto;text-align:right">
+          <span class="badge ${i.type&&i.type.includes('Suspended')?'badge-amber':'badge-red'}">${i.type||'Infortuno'}</span>
+          <div style="font-size:11px;color:var(--muted);margin-top:3px">Rientro: ${i.end_date ? new Date(i.end_date).toLocaleDateString('it') : 'N/D'}</div>
+        </div>
+      </div>
+    </div>`).join('');
+}
+
+// ══════════════════════════════════════════════════════
+// TRANSFERS
+// ══════════════════════════════════════════════════════
+async function loadTransfers() {
+  const data = await api('/api/transfers');
+  if (!data) { document.getElementById('transfers-container').innerHTML = '<div class="error-msg">Backend non raggiungibile.</div>'; return; }
+  allTransfers = data;
+  document.getElementById('t-total').textContent = data.length;
+  document.getElementById('t-hwg').textContent = data.filter(t => t.here_we_go).length;
+  document.getElementById('t-conf').textContent = data.filter(t => t.status === 'confirmed').length;
+  if (data.length) {
+    const latest = data.reduce((a,b) => new Date(a.updated_at) > new Date(b.updated_at) ? a : b);
+    document.getElementById('t-last').textContent = new Date(latest.updated_at).toLocaleTimeString('it',{hour:'2-digit',minute:'2-digit'});
+  }
+  renderTransfers();
+}
+
+function renderTransfers() {
+  let list = [...allTransfers];
+  if (transferFilter === 'hot') list = list.filter(t => t.status === 'advanced' || t.probability >= 70);
+  if (transferFilter === 'confirmed') list = list.filter(t => t.status === 'confirmed' || t.here_we_go);
+  const q = document.getElementById('transfer-search').value.toLowerCase();
+  if (q) list = list.filter(t => (t.player||'').toLowerCase().includes(q) || (t.from_team||'').toLowerCase().includes(q) || (t.to_team||'').toLowerCase().includes(q));
+
+  if (!list.length) { document.getElementById('transfers-container').innerHTML = '<div style="color:var(--muted);padding:20px;font-size:14px">Nessun rumor trovato.</div>'; return; }
+
+  document.getElementById('transfers-container').innerHTML = list.map(t => {
+    const status = t.here_we_go ? 'hot' : t.probability >= 65 ? 'warm' : '';
+    const color = t.probability >= 80 ? 'var(--red)' : t.probability >= 50 ? 'var(--amber)' : 'var(--blue)';
+    const circ = 2 * Math.PI * 26;
+    const dash = (t.probability / 100) * circ;
+    const srcs = Array.isArray(t.sources) ? t.sources.slice(-3).map(s => typeof s === 'object' ? s.source : s) : [];
+    return `<div class="transfer-card ${status}">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px">
+        <div>
+          <div style="font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:800;text-transform:uppercase">${t.player}${t.here_we_go?' <span style="color:var(--green);font-size:14px">HERE WE GO!</span>':''}</div>
+          <div style="font-size:13px;color:var(--muted);margin-top:3px">${t.from_team||'?'} ${t.to_team?'→ <span style="color:var(--acc)">'+t.to_team+'</span>':''}</div>
+          ${srcs.length ? `<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:7px">${srcs.map(s=>`<span style="padding:2px 7px;border-radius:4px;font-size:11px;background:var(--bg3);border:1px solid var(--border);color:var(--muted)">${s}</span>`).join('')}</div>` : ''}
+        </div>
+        <div class="prob-ring">
+          <svg width="60" height="60" viewBox="0 0 60 60">
+            <circle cx="30" cy="30" r="26" fill="none" stroke="rgba(255,255,255,.06)" stroke-width="5"/>
+            <circle cx="30" cy="30" r="26" fill="none" stroke="${color}" stroke-width="5" stroke-dasharray="${dash} ${circ}" stroke-dashoffset="${circ*.25}" stroke-linecap="round"/>
+          </svg>
+          <div class="prob-num" style="color:${color}">${Math.round(t.probability)}%</div>
+        </div>
+      </div>
+      ${t.detail ? `<div style="font-size:13px;color:var(--muted);line-height:1.6;padding-top:10px;border-top:1px solid var(--border)">${t.detail.slice(0,300)}${t.detail.length>300?'…':''}</div>` : ''}
+      <div style="margin-top:8px">
+        <div class="prog"><div class="prog-fill" style="width:${t.probability}%;background:${color}"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--dim);margin-top:2px"><span>0%</span><span>probabilità trasferimento</span><span>100%</span></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function setTransferFilter(btn, f) {
+  document.querySelectorAll('#page-transfers .filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active'); transferFilter = f; renderTransfers();
+}
+function filterTransferList() { renderTransfers(); }
+
+// ══════════════════════════════════════════════════════
+// PREDICTIONS
+// ══════════════════════════════════════════════════════
+function buildPredMatchSelect() {
+  const upcoming = allMatches.filter(m => m.status !== 'finished').slice(0, 10);
+  const sel = document.getElementById('pred-match-select');
+  sel.innerHTML = upcoming.map(m =>
+    `<button class="filter-btn" data-id="${m.id}" onclick="loadPrediction(${m.id},this)">${m.home.short||m.home.name} vs ${m.away.short||m.away.name}</button>`
+  ).join('');
+}
+
+async function loadPrediction(matchId, btn) {
+  if(btn) { document.querySelectorAll('#pred-match-select .filter-btn').forEach(b => b.classList.remove('active')); btn.classList.add('active'); }
+  document.getElementById('pred-container').innerHTML = '<div class="loading"><div class="spinner"></div>Calcolo previsione ML…</div>';
+  const data = await api(`/api/matches/${matchId}/prediction`);
+  const match = allMatches.find(m => m.id === matchId);
+  if (!data || !match) { document.getElementById('pred-container').innerHTML = '<div class="error-msg">Previsione non disponibile. Assicurati che il modello ML sia addestrato (<code>python ml/train.py</code>).</div>'; return; }
+  renderPrediction(data, match);
+}
+
+function renderPrediction(pred, match) {
+  const maxProb = Math.max(pred.outcome.home, pred.outcome.draw, pred.outcome.away);
+  const scores = Object.entries(pred.scores || {}).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  const scorers = (pred.scorers || []).slice(0,5);
+  const booked = (pred.booked || []).slice(0,4);
+  document.getElementById('pred-container').innerHTML = `
+    <div class="card" style="margin-bottom:14px;text-align:center;padding:20px">
+      <div style="font-family:'Barlow Condensed',sans-serif;font-size:26px;font-weight:800;text-transform:uppercase">${match.home.name} <span style="color:var(--dim)">vs</span> ${match.away.name}</div>
+      <div style="font-size:12px;color:var(--muted);margin-top:4px">${pred.model} · Confidence: ${Math.round((pred.confidence||0)*100)}%</div>
+    </div>
+    <div class="grid3" style="margin-bottom:14px">
+      <div class="card">
+        <div class="card-title">Esito previsto</div>
+        <div style="display:flex;gap:7px">
+          ${[{l:'1',v:pred.outcome.home,q:match.odds?.home_win},{l:'X',v:pred.outcome.draw,q:match.odds?.draw},{l:'2',v:pred.outcome.away,q:match.odds?.away_win}].map(o=>`
+            <div style="flex:1;text-align:center;padding:10px 6px;border-radius:8px;background:${o.v===maxProb?'rgba(0,230,118,.1)':'var(--bg3)'};border:1px solid ${o.v===maxProb?'rgba(0,230,118,.3)':'var(--border)'}">
+              <div style="font-family:'Barlow Condensed',sans-serif;font-size:26px;font-weight:800;color:${o.v===maxProb?'var(--acc)':'var(--text)'}">${o.l}</div>
+              <div style="font-size:17px;font-weight:700;color:${o.v===maxProb?'var(--acc)':'var(--muted)'}">${Math.round(o.v)}%</div>
+              ${o.q?`<div style="font-size:10px;color:var(--dim)">${o.q.toFixed(2)}</div>`:''}
+            </div>`).join('')}
+        </div>
+        <div class="odds-bar" style="margin-top:10px">
+          <div class="odds-seg odds-1" style="flex:${Math.round(pred.outcome.home)}">${Math.round(pred.outcome.home)}%</div>
+          <div class="odds-seg odds-x" style="flex:${Math.round(pred.outcome.draw)}">${Math.round(pred.outcome.draw)}%</div>
+          <div class="odds-seg odds-2" style="flex:${Math.round(pred.outcome.away)}">${Math.round(pred.outcome.away)}%</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Risultati più probabili</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${scores.map((s,i)=>`<div class="score-opt ${i===0?'top':''}"><div>${s[0]}</div><span class="score-pct">${s[1].toFixed(1)}%</span></div>`).join('')}
+        </div>
+        <div class="divider" style="margin:10px 0"></div>
+        <div class="stat-row"><span class="stat-label">BTTS</span><span class="stat-val" style="color:var(--acc)">${Math.round(pred.btts||0)}%</span></div>
+        <div class="stat-row"><span class="stat-label">Over 2.5</span><span class="stat-val">${Math.round(pred.over25||0)}%</span></div>
+      </div>
+      <div class="card">
+        <div class="card-title">⚽ Marcatori probabili</div>
+        ${scorers.map((s,i)=>`<div class="stat-row"><span class="stat-label"><span style="color:var(--dim);font-family:'Barlow Condensed',sans-serif;font-size:18px;margin-right:8px">${i+1}</span>${s.name}</span><span class="stat-val" style="color:var(--green)">${Math.round(s.prob)}%</span></div>`).join('')}
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">🟨 Ammoniti più probabili</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        ${booked.map(b=>`<div style="display:flex;align-items:center;gap:8px;background:var(--bg3);border-radius:6px;padding:8px 12px"><div style="width:11px;height:15px;background:var(--amber);border-radius:2px;flex-shrink:0"></div><div><div style="font-size:13px;font-weight:500">${b.name}</div></div><div style="font-size:13px;font-weight:700;color:var(--amber);margin-left:auto;padding-left:12px">${Math.round(b.prob)}%</div></div>`).join('')}
+      </div>
+    </div>`;
+}
+
+// ══════════════════════════════════════════════════════
+// CHAT
+// ══════════════════════════════════════════════════════
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = ''; input.style.height = 'auto';
+  appendMsg('user', text);
+  document.getElementById('chat-btn').disabled = true;
+  appendTyping();
+
+  try {
+    const res = await fetch(API_BASE + '/api/chat/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text, session_id: chatSessionId }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    chatSessionId = data.session_id;
+    removeTyping();
+    appendMsg('bot', data.response);
+  } catch(e) {
+    removeTyping();
+    appendMsg('bot', '⚠️ Backend non raggiungibile. Configura l\'URL nella sezione Setup e assicurati che il server sia attivo.\n\nErrore: ' + e.message);
+  }
+  document.getElementById('chat-btn').disabled = false;
+}
+
+function appendMsg(role, text) {
+  const msgs = document.getElementById('chat-messages');
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.innerHTML = `<div class="msg-meta">${role==='bot'?'FootballHub AI':'Tu'}</div><div class="msg-bubble">${text.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function appendTyping() {
+  const msgs = document.getElementById('chat-messages');
+  const d = document.createElement('div');
+  d.className = 'msg bot'; d.id = 'typing-ind';
+  d.innerHTML = '<div class="msg-meta">FootballHub AI</div><div class="msg-bubble"><div class="typing"><span></span><span></span><span></span></div></div>';
+  msgs.appendChild(d); msgs.scrollTop = msgs.scrollHeight;
+}
+function removeTyping() { const t = document.getElementById('typing-ind'); if(t) t.remove(); }
+
+function chatKey(e) { if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();} }
+function autoResize(el) { el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,120)+'px'; }
+function quickChat(text) {
+  showPage('chat'); document.querySelectorAll('.nav-tab')[4].classList.add('active');
+  document.querySelectorAll('.nav-tab').forEach((t,i)=>{if(i!==4)t.classList.remove('active');});
+  document.getElementById('chat-input').value = text; sendChat();
+}
+
+// ══════════════════════════════════════════════════════
+// SETUP
+// ══════════════════════════════════════════════════════
+async function testConnection() {
+  const url = document.getElementById('cfg-url').value.trim() || 'http://localhost:8000';
+  API_BASE = url; localStorage.setItem('fh_api', url);
+  document.getElementById('cfg-status').textContent = 'Test…';
+  document.getElementById('cfg-status').className = 'badge badge-dim';
+  const data = await api('/health');
+  if (data && data.status === 'ok') {
+    document.getElementById('cfg-status').textContent = '✓ Connesso';
+    document.getElementById('cfg-status').className = 'badge badge-green';
+    document.getElementById('svc-db').textContent = '✓ OK';
+    document.getElementById('svc-db').className = 'badge badge-green';
+    connectWS(); loadMatches(); loadTransfers(); loadInjuries();
+  } else {
+    document.getElementById('cfg-status').textContent = '✗ Non raggiungibile';
+    document.getElementById('cfg-status').className = 'badge badge-red';
+  }
+}
+
+function saveConfig() {
+  const url = document.getElementById('cfg-url').value.trim();
+  if (url) { API_BASE = url; localStorage.setItem('fh_api', url); }
+  showToast('✅ Configurazione salvata');
+}
+
+async function adminAction(action) {
+  const secret = prompt('Inserisci il SECRET_KEY (da .env):');
+  if (!secret) return;
+  const log = document.getElementById('admin-log');
+  log.textContent += `> Avvio ${action}…\n`;
+  const data = await api(`/api/admin/${action}?secret=${encodeURIComponent(secret)}`, {method:'POST'});
+  if (data) {
+    log.textContent += `✓ Task avviato: ${data.task_id}\n`;
+  } else {
+    log.textContent += `✗ Errore — controlla URL e secret key\n`;
+  }
+}
+
+// ══════════════════════════════════════════════════════
+// UTILS
+// ══════════════════════════════════════════════════════
+function getDateStr(daysOffset) {
+  const d = new Date(); d.setDate(d.getDate() + daysOffset);
+  return d.toISOString().split('T')[0];
+}
+</script>
+</body>
+</html>
