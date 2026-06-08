@@ -394,7 +394,7 @@ function showToast(msg) {
 // MATCHES
 // ══════════════════════════════════════════════════════
 async function loadMatches() {
-  const data = await api('/api/matches?date_from=' + getDateStr(0) + '&date_to=' + getDateStr(7));
+  const data = await api('/api/matches?date_from=' + getDateStr(-30) + '&date_to=' + getDateStr(60));
   if (!data) { document.getElementById('matches-container').innerHTML = '<div class="error-msg">Backend non raggiungibile. Configura l\'URL nella sezione Setup.</div>'; return; }
   allMatches = data;
   renderMatches();
