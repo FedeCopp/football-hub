@@ -1,20 +1,10 @@
 """
 ml/predictor.py
-Modello predittivo per le partite di calcio.
+Modello predittivo migliorato.
 
-Architettura ensemble:
-  - XGBoost      → probabilità esito 1/X/2
-  - Poisson      → distribuzione gol (risultati esatti)
-  - Random Forest → probabilità marcatori e ammoniti
-
-Feature usate:
-  - Forma ultima 10 partite (casa/trasferta separati)
-  - Head-to-head ultimi 5 anni
-  - xG stagionali (expected goals)
-  - Statistiche individuali giocatori in formazione
-  - Quote bookmaker (probabilità implicite normalizzate)
-  - Infortuni / assenze
-  - Giorni di riposo dall'ultima partita
+Quando il modello ML non è addestrato usa un sistema basato su regole
+che considera: scontri diretti, forma recente, posizione in classifica,
+differenza reti, rendimento casa/trasferta, infortuni.
 """
 import logging
 import pickle
@@ -26,800 +16,610 @@ import numpy as np
 import pandas as pd
 
 from db.database import get_db_session
-from db.models import Match, Team, Player, Lineup, LineupPlayer, PlayerStats, Odds, Prediction, Injury
+from db.models import Match, Team, Lineup, LineupPlayer, PlayerStats, Odds, Prediction, Injury, Competition
 
 logger = logging.getLogger(__name__)
-
 MODEL_DIR = Path(__file__).parent / "models"
 MODEL_DIR.mkdir(exist_ok=True)
 
 
 class FootballPredictor:
-    """
-    Predittore completo per partite di calcio.
-    Prima esegui `train()` con i dati storici, poi usa `predict_match()`.
-    """
 
     def __init__(self):
-        self.outcome_model  = None   # XGBoost → 1/X/2
-        self.goals_model    = None   # Poisson params
-        self.scorer_model   = None   # RandomForest
-        self.booked_model   = None   # RandomForest
+        self.outcome_model = None
+        self.goals_model = None
         self._load_models()
 
     # ─────────────────────────────────────────────────────────
-    # FEATURE ENGINEERING
-    # ─────────────────────────────────────────────────────────
-
-    def build_match_features(self, match_id: int) -> Optional[pd.Series]:
-        """
-        Costruisce il vettore di feature per un match.
-        Questo è il cuore del sistema — più feature = più accuratezza.
-        """
-        with get_db_session() as db:
-            match = db.query(Match).filter_by(id=match_id).first()
-            if not match or not match.kickoff:
-                return None
-
-            home_id = match.home_team_id
-            away_id = match.away_team_id
-
-            f = {}
-
-            # ── Forma recente ────────────────────────────────
-            home_form_h = self._get_form(db, home_id, match.kickoff, venue="home", n=10)
-            home_form_a = self._get_form(db, home_id, match.kickoff, venue="away", n=10)
-            away_form_h = self._get_form(db, away_id, match.kickoff, venue="home", n=10)
-            away_form_a = self._get_form(db, away_id, match.kickoff, venue="away", n=10)
-
-            f["home_pts_home"]    = home_form_h["points"]
-            f["home_gf_home"]     = home_form_h["goals_for"]
-            f["home_ga_home"]     = home_form_h["goals_against"]
-            f["home_xg_home"]     = home_form_h["xg"]
-            f["home_pts_away"]    = home_form_a["points"]
-
-            f["away_pts_away"]    = away_form_a["points"]
-            f["away_gf_away"]     = away_form_a["goals_for"]
-            f["away_ga_away"]     = away_form_a["goals_against"]
-            f["away_xg_away"]     = away_form_a["xg"]
-            f["away_pts_home"]    = away_form_h["points"]
-
-            # Forma combinata ultimi 5 (qualsiasi sede)
-            home_form5 = self._get_form(db, home_id, match.kickoff, venue="all", n=5)
-            away_form5 = self._get_form(db, away_id, match.kickoff, venue="all", n=5)
-            f["home_form5_pts"]   = home_form5["points"]
-            f["away_form5_pts"]   = away_form5["points"]
-            f["form_diff"]        = home_form5["points"] - away_form5["points"]
-
-            # ── Head-to-head ─────────────────────────────────
-            h2h = self._get_h2h(db, home_id, away_id, match.kickoff, n=10)
-            f["h2h_home_wins"]    = h2h["home_wins"]
-            f["h2h_draws"]        = h2h["draws"]
-            f["h2h_away_wins"]    = h2h["away_wins"]
-            f["h2h_home_goals"]   = h2h["home_goals_avg"]
-            f["h2h_away_goals"]   = h2h["away_goals_avg"]
-            f["h2h_btts_rate"]    = h2h["btts_rate"]
-
-            # ── Quote (probabilità implicite) ─────────────────
-            odds = db.query(Odds).filter_by(
-                match_id=match_id, market="1x2", bookmaker="average"
-            ).first()
-            if odds and odds.impl_home:
-                f["odds_impl_home"]  = odds.impl_home
-                f["odds_impl_draw"]  = odds.impl_draw
-                f["odds_impl_away"]  = odds.impl_away
-                f["odds_home_raw"]   = odds.home_win or 0
-                f["odds_away_raw"]   = odds.away_win or 0
-            else:
-                f["odds_impl_home"]  = 33.3
-                f["odds_impl_draw"]  = 33.3
-                f["odds_impl_away"]  = 33.3
-                f["odds_home_raw"]   = 0.0
-                f["odds_away_raw"]   = 0.0
-
-            # ── xG stagionali ─────────────────────────────────
-            home_season = self._get_season_stats(db, home_id, match.kickoff)
-            away_season = self._get_season_stats(db, away_id, match.kickoff)
-            f["home_xg_season"]   = home_season.get("xg_per_match", 1.2)
-            f["home_xga_season"]  = home_season.get("xga_per_match", 1.2)
-            f["away_xg_season"]   = away_season.get("xg_per_match", 1.2)
-            f["away_xga_season"]  = away_season.get("xga_per_match", 1.2)
-            f["xg_diff"]          = f["home_xg_season"] - f["away_xg_season"]
-
-            # ── Riposo / stanchezza ───────────────────────────
-            f["home_days_rest"]   = self._days_since_last_match(db, home_id, match.kickoff)
-            f["away_days_rest"]   = self._days_since_last_match(db, away_id, match.kickoff)
-            f["rest_advantage"]   = f["home_days_rest"] - f["away_days_rest"]
-
-            # ── Forza formazione (da lineup) ──────────────────
-            home_lineup_str = self._lineup_strength(db, match_id, home_id)
-            away_lineup_str = self._lineup_strength(db, match_id, away_id)
-            f["home_lineup_str"]  = home_lineup_str
-            f["away_lineup_str"]  = away_lineup_str
-            f["lineup_diff"]      = home_lineup_str - away_lineup_str
-
-            # ── Infortuni ─────────────────────────────────────
-            home_injuries = self._count_key_injuries(db, home_id)
-            away_injuries = self._count_key_injuries(db, away_id)
-            f["home_injuries"]    = home_injuries
-            f["away_injuries"]    = away_injuries
-
-            return pd.Series(f)
-
-    # ─────────────────────────────────────────────────────────
-    # PREDIZIONE PARTITA
+    # PREDIZIONE PRINCIPALE
     # ─────────────────────────────────────────────────────────
 
     def predict_match(self, match_id: int) -> Optional[Prediction]:
-        """
-        Genera la previsione completa per una partita e la salva nel DB.
-        """
-        features = self.build_match_features(match_id)
-        if features is None:
-            logger.warning(f"Feature non disponibili per match {match_id}")
-            return None
+        with get_db_session() as db:
+            match = db.query(Match).filter_by(id=match_id).first()
+            if not match:
+                return None
+            home_id = match.home_team_id
+            away_id = match.away_team_id
+            comp_id = match.competition_id
+            kickoff = match.kickoff
 
-        X = features.values.reshape(1, -1)
-
-        # ── Esito 1/X/2 ──────────────────────────────────────
+        # Prova ML prima
         if self.outcome_model:
-            probs = self.outcome_model.predict_proba(X)[0]
-            prob_home = round(float(probs[1]) * 100, 1)  # classe 1 = home win
-            prob_draw = round(float(probs[0]) * 100, 1)  # classe 0 = draw
-            prob_away = round(float(probs[2]) * 100, 1)  # classe 2 = away win
-        else:
-            # Fallback: usa probabilità implicite quote
-            prob_home = float(features.get("odds_impl_home", 33.3))
-            prob_draw = float(features.get("odds_impl_draw", 33.3))
-            prob_away = float(features.get("odds_impl_away", 33.3))
+            try:
+                features = self.build_match_features(match_id)
+                if features is not None:
+                    return self._predict_with_ml(match_id, features)
+            except Exception as e:
+                logger.warning(f"ML fallback to rules for match {match_id}: {e}")
 
-        # ── Risultati esatti (Poisson bivariato) ─────────────
-        home_lambda, away_lambda = self._estimate_goal_rates(features)
-        score_probs = self._poisson_score_probs(home_lambda, away_lambda)
+        # Fallback: sistema basato su regole
+        return self._predict_with_rules(match_id, home_id, away_id, comp_id, kickoff)
 
-        # ── Marcatori probabili ───────────────────────────────
-        scorer_probs = self._predict_scorers(match_id, home_lambda, away_lambda)
+    # ─────────────────────────────────────────────────────────
+    # SISTEMA BASATO SU REGOLE (funziona senza ML)
+    # ─────────────────────────────────────────────────────────
 
-        # ── Ammoniti probabili ────────────────────────────────
-        booked_probs = self._predict_bookings(match_id)
+    def _predict_with_rules(self, match_id, home_id, away_id, comp_id, kickoff) -> Optional[Prediction]:
+        """
+        Calcola probabilità usando:
+        1. Scontri diretti storici
+        2. Forma recente (ultimi 8 match)
+        3. Posizione in classifica
+        4. Rendimento casa/trasferta
+        5. Differenza reti
+        6. Quote bookmaker (se disponibili)
+        7. Infortuni chiave
+        """
+        with get_db_session() as db:
+            now = kickoff or datetime.utcnow()
 
-        # ── Altri mercati ─────────────────────────────────────
-        btts_prob  = round(self._calc_btts(home_lambda, away_lambda) * 100, 1)
-        over25_prob = round(self._calc_over_n5(home_lambda, away_lambda, 2.5) * 100, 1)
+            # ── 1. Scontri diretti ──────────────────────────
+            h2h = self._get_h2h(db, home_id, away_id, now, n=10)
+            h2h_home_rate = h2h["home_wins"] / max(h2h["total"], 1)
+            h2h_draw_rate = h2h["draws"] / max(h2h["total"], 1)
+            h2h_away_rate = h2h["away_wins"] / max(h2h["total"], 1)
 
-        # ── Confidence score ──────────────────────────────────
-        # Alta se abbiamo dati storici abbondanti e quote disponibili
-        has_odds    = float(features.get("odds_impl_home", 0)) > 0
-        has_h2h     = float(features.get("h2h_home_wins", 0)) + float(features.get("h2h_draws", 0)) > 0
-        confidence  = 0.5 + (0.25 if has_odds else 0) + (0.15 if has_h2h else 0)
+            # ── 2. Forma recente ────────────────────────────
+            home_form = self._get_form(db, home_id, now, n=8)
+            away_form = self._get_form(db, away_id, now, n=8)
 
-        # ── Salva nel DB ──────────────────────────────────────
+            # ── 3. Forma casa/trasferta specifica ───────────
+            home_home_form = self._get_form(db, home_id, now, n=6, venue="home")
+            away_away_form = self._get_form(db, away_id, now, n=6, venue="away")
+
+            # ── 4. Classifica della stagione ────────────────
+            home_standing = self._get_standing(db, home_id, comp_id, now)
+            away_standing = self._get_standing(db, away_id, comp_id, now)
+
+            # ── 5. Infortuni ────────────────────────────────
+            home_injuries = self._count_injuries(db, home_id)
+            away_injuries = self._count_injuries(db, away_id)
+
+            # ── 6. Quote bookmaker ──────────────────────────
+            odds = db.query(Odds).filter_by(
+                match_id=match_id, market="1x2", bookmaker="average"
+            ).first()
+
+            # ── Calcolo score ───────────────────────────────
+            # Base: vantaggio casa (in media 45% vittorie home nel calcio)
+            home_score = 1.45
+            away_score = 1.00
+            draw_score = 0.85
+
+            # Aggiusta per forma recente (punti per partita, max 3)
+            if home_form["played"] >= 3:
+                home_score += (home_form["ppm"] - 1.5) * 0.4
+            if away_form["played"] >= 3:
+                away_score += (away_form["ppm"] - 1.5) * 0.4
+
+            # Aggiusta per forma casa/trasferta specifica
+            if home_home_form["played"] >= 3:
+                home_score += (home_home_form["ppm"] - 1.5) * 0.3
+            if away_away_form["played"] >= 3:
+                away_score += (away_away_form["ppm"] - 1.5) * 0.3
+
+            # Aggiusta per classifica (differenza posizioni normalizzata)
+            if home_standing["position"] > 0 and away_standing["position"] > 0:
+                pos_diff = (away_standing["position"] - home_standing["position"]) / 20.0
+                home_score += pos_diff * 0.3
+                away_score -= pos_diff * 0.3
+
+            # Aggiusta per differenza reti media
+            if home_form["played"] >= 3:
+                home_score += home_form["gd_per_match"] * 0.15
+            if away_form["played"] >= 3:
+                away_score += away_form["gd_per_match"] * 0.15
+
+            # Aggiusta per scontri diretti (peso 20%)
+            if h2h["total"] >= 3:
+                home_score = home_score * 0.80 + h2h_home_rate * 3.0 * 0.20
+                away_score = away_score * 0.80 + h2h_away_rate * 3.0 * 0.20
+                draw_score = draw_score * 0.80 + h2h_draw_rate * 3.0 * 0.20
+
+            # Penalizza per infortuni
+            home_score -= home_injuries * 0.05
+            away_score -= away_injuries * 0.05
+
+            # Converti score in probabilità
+            total = max(home_score + draw_score + away_score, 0.1)
+            prob_home = (home_score / total) * 100
+            prob_draw = (draw_score / total) * 100
+            prob_away = (away_score / total) * 100
+
+            # Blend con quote bookmaker se disponibili (peso 35%)
+            if odds and odds.impl_home and odds.impl_home != 33.3:
+                prob_home = prob_home * 0.65 + odds.impl_home * 0.35
+                prob_draw = prob_draw * 0.65 + odds.impl_draw * 0.35
+                prob_away = prob_away * 0.65 + odds.impl_away * 0.35
+
+            # Normalizza
+            total_prob = prob_home + prob_draw + prob_away
+            prob_home = round((prob_home / total_prob) * 100, 1)
+            prob_draw = round((prob_draw / total_prob) * 100, 1)
+            prob_away = round(100 - prob_home - prob_draw, 1)
+
+            # Gol attesi (Poisson)
+            home_goals_avg = home_home_form.get("gf_per_match", 1.3) if home_home_form["played"] >= 3 else 1.3
+            away_goals_avg = away_away_form.get("gf_per_match", 1.0) if away_away_form["played"] >= 3 else 1.0
+            home_lambda = (home_goals_avg + away_form.get("ga_per_match", 1.2)) / 2
+            away_lambda = (away_goals_avg + home_form.get("ga_per_match", 1.1)) / 2
+            home_lambda = max(0.3, home_lambda)
+            away_lambda = max(0.2, away_lambda)
+
+            score_probs = self._poisson_score_probs(home_lambda, away_lambda)
+            btts = round(self._calc_btts(home_lambda, away_lambda) * 100, 1)
+            over25 = round(self._calc_over(home_lambda, away_lambda, 2.5) * 100, 1)
+
+            # Marcatori e ammoniti
+            scorer_probs = self._predict_scorers(db, match_id, home_lambda, away_lambda)
+            booked_probs = self._predict_bookings(db, match_id)
+
+            # Confidence: alta se abbiamo molti dati
+            data_points = home_form["played"] + away_form["played"] + h2h["total"]
+            confidence = min(0.95, 0.3 + data_points * 0.02 + (0.15 if odds else 0))
+
+        # Salva
         with get_db_session() as db:
             pred = db.query(Prediction).filter_by(match_id=match_id).first()
             if not pred:
                 pred = Prediction(match_id=match_id)
                 db.add(pred)
+            pred.prob_home = prob_home
+            pred.prob_draw = prob_draw
+            pred.prob_away = prob_away
+            pred.score_probs = score_probs
+            pred.scorer_probs = scorer_probs
+            pred.booked_probs = booked_probs
+            pred.btts_prob = btts
+            pred.over25_prob = over25
+            pred.model_version = "v2.0-rules+ml"
+            pred.confidence = round(confidence, 2)
+            pred.created_at = datetime.utcnow()
 
-            pred.prob_home     = prob_home
-            pred.prob_draw     = prob_draw
-            pred.prob_away     = prob_away
-            pred.score_probs   = score_probs
-            pred.scorer_probs  = scorer_probs
-            pred.booked_probs  = booked_probs
-            pred.btts_prob     = btts_prob
-            pred.over25_prob   = over25_prob
-            pred.model_version = "v1.0-ensemble"
-            pred.confidence    = round(confidence, 2)
-            pred.created_at    = datetime.utcnow()
-
-        logger.info(
-            f"Previsione match {match_id}: "
-            f"1={prob_home}% X={prob_draw}% 2={prob_away}% "
-            f"[confidence={confidence:.2f}]"
-        )
+        logger.info(f"Previsione match {match_id}: 1={prob_home}% X={prob_draw}% 2={prob_away}% [conf={confidence:.2f}]")
         return pred
 
     # ─────────────────────────────────────────────────────────
-    # TRAINING
+    # HELPER: STATISTICHE
     # ─────────────────────────────────────────────────────────
 
-    def train(self, min_matches: int = 200) -> dict:
-        """
-        Addestra i modelli su tutti i match storici nel DB.
-        Da eseguire dopo l'import iniziale dei dati.
-
-        min_matches: numero minimo di partite richieste per il training.
-        """
-        from sklearn.ensemble import RandomForestClassifier
-        from sklearn.model_selection import train_test_split
-        from sklearn.metrics import accuracy_score
-        import xgboost as xgb
-
-        logger.info("Inizio training modelli ML...")
-
-        # Raccoglie feature per tutte le partite finite
-        X_rows, y_outcome, y_home_goals, y_away_goals = [], [], [], []
-
-        with get_db_session() as db:
-            finished = db.query(Match).filter(
-                Match.status == "finished",
-                Match.home_score.isnot(None),
-            ).all()
-            match_ids = [m.id for m in finished]
-
-        logger.info(f"Partite disponibili per training: {len(match_ids)}")
-
-        if len(match_ids) < min_matches:
-            logger.warning(
-                f"Solo {len(match_ids)} partite disponibili. "
-                f"Minimo richiesto: {min_matches}. "
-                f"Esegui prima l'import storico."
-            )
-            return {"error": "insufficient_data", "available": len(match_ids)}
-
-        for mid in match_ids:
-            try:
-                feats = self.build_match_features(mid)
-                if feats is None:
-                    continue
-
-                with get_db_session() as db:
-                    match = db.query(Match).filter_by(id=mid).first()
-                    hg    = match.home_score or 0
-                    ag    = match.away_score or 0
-
-                # Esito: 1 = home, 0 = draw, 2 = away
-                if hg > ag:
-                    outcome = 1
-                elif hg == ag:
-                    outcome = 0
-                else:
-                    outcome = 2
-
-                X_rows.append(feats.values)
-                y_outcome.append(outcome)
-                y_home_goals.append(hg)
-                y_away_goals.append(ag)
-
-            except Exception as e:
-                logger.debug(f"Skip match {mid}: {e}")
-
-        if not X_rows:
-            return {"error": "no_features_built"}
-
-        X = np.array(X_rows)
-        y = np.array(y_outcome)
-
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
-
-        # ── XGBoost per esito ─────────────────────────────────
-        logger.info("Training XGBoost (esito)...")
-        self.outcome_model = xgb.XGBClassifier(
-            n_estimators=300,
-            max_depth=5,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            use_label_encoder=False,
-            eval_metric="mlogloss",
-            random_state=42,
-        )
-        self.outcome_model.fit(
-            X_train, y_train,
-            eval_set=[(X_test, y_test)],
-            verbose=False,
-        )
-
-        acc = accuracy_score(y_test, self.outcome_model.predict(X_test))
-        logger.info(f"XGBoost accuracy: {acc:.3f}")
-
-        # ── Stima Poisson (media gol per team) ────────────────
-        # Semplice modello Dixon-Coles: stima attack/defense per ogni squadra
-        self.goals_model = self._fit_poisson_model(
-            X_rows, y_home_goals, y_away_goals
-        )
-
-        # ── RandomForest per ammoniti ─────────────────────────
-        # Target: numero totale cartellini nella partita (0,1,2,3,4+)
-        logger.info("Training RandomForest (ammoniti)...")
-        with get_db_session() as db:
-            yellow_data = []
-            for mid in match_ids[:len(X_rows)]:
-                m = db.query(Match).filter_by(id=mid).first()
-                if m:
-                    tot = (m.home_yellow or 0) + (m.away_yellow or 0)
-                    yellow_data.append(min(tot, 6))   # cap a 6
-
-        if len(yellow_data) == len(X_rows):
-            self.booked_model = RandomForestClassifier(
-                n_estimators=200, max_depth=6, random_state=42
-            )
-            self.booked_model.fit(X_train, np.array(yellow_data)[:len(y_train)])
-
-        # Salva modelli
-        self._save_models()
-
-        result = {
-            "outcome_accuracy": round(acc, 3),
-            "training_samples": len(X_rows),
-            "test_samples": len(X_test),
-            "model_version": "v1.0-ensemble",
-        }
-        logger.info(f"Training completato: {result}")
-        return result
-
-    # ─────────────────────────────────────────────────────────
-    # HELPER: STATISTICHE STORICHE
-    # ─────────────────────────────────────────────────────────
-
-    def _get_form(
-        self, db, team_id: int, before: datetime,
-        venue: str = "all", n: int = 10
-    ) -> dict:
-        """Statistiche forma per le ultime N partite."""
-        query = db.query(Match).filter(
+    def _get_form(self, db, team_id, before, n=8, venue="all") -> dict:
+        from sqlalchemy import or_
+        q = db.query(Match).filter(
             Match.status == "finished",
             Match.kickoff < before,
             Match.home_score.isnot(None),
         )
         if venue == "home":
-            query = query.filter(Match.home_team_id == team_id)
+            q = q.filter(Match.home_team_id == team_id)
         elif venue == "away":
-            query = query.filter(Match.away_team_id == team_id)
+            q = q.filter(Match.away_team_id == team_id)
         else:
-            query = query.filter(
-                (Match.home_team_id == team_id) | (Match.away_team_id == team_id)
-            )
+            q = q.filter(or_(Match.home_team_id == team_id, Match.away_team_id == team_id))
 
-        matches = query.order_by(Match.kickoff.desc()).limit(n).all()
-
+        matches = q.order_by(Match.kickoff.desc()).limit(n).all()
         if not matches:
-            return {"points": 0, "goals_for": 0, "goals_against": 0, "xg": 0}
+            return {"played": 0, "ppm": 1.2, "gf_per_match": 1.2, "ga_per_match": 1.2, "gd_per_match": 0}
 
-        points, gf, ga, xg_sum = 0, 0, 0, 0.0
+        pts, gf, ga = 0, 0, 0
         for m in matches:
-            if m.home_team_id == team_id:
-                g_for  = m.home_score or 0
-                g_ag   = m.away_score or 0
-                xg_sum += m.home_xg or g_for
-                if g_for > g_ag:
-                    points += 3
-                elif g_for == g_ag:
-                    points += 1
-            else:
-                g_for  = m.away_score or 0
-                g_ag   = m.home_score or 0
-                xg_sum += m.away_xg or g_for
-                if g_for > g_ag:
-                    points += 3
-                elif g_for == g_ag:
-                    points += 1
-            gf += g_for
-            ga += g_ag
+            is_home = m.home_team_id == team_id
+            g_for = (m.home_score or 0) if is_home else (m.away_score or 0)
+            g_ag = (m.away_score or 0) if is_home else (m.home_score or 0)
+            gf += g_for; ga += g_ag
+            if g_for > g_ag: pts += 3
+            elif g_for == g_ag: pts += 1
 
-        n_actual = len(matches)
+        n_real = len(matches)
         return {
-            "points":         round(points / n_actual, 2),
-            "goals_for":      round(gf / n_actual, 2),
-            "goals_against":  round(ga / n_actual, 2),
-            "xg":             round(xg_sum / n_actual, 2),
+            "played": n_real,
+            "ppm": pts / n_real,
+            "gf_per_match": gf / n_real,
+            "ga_per_match": ga / n_real,
+            "gd_per_match": (gf - ga) / n_real,
         }
 
-    def _get_h2h(
-        self, db, home_id: int, away_id: int,
-        before: datetime, n: int = 10
-    ) -> dict:
-        """Head-to-head tra le due squadre."""
+    def _get_h2h(self, db, home_id, away_id, before, n=10) -> dict:
+        from sqlalchemy import or_, and_
         matches = db.query(Match).filter(
             Match.status == "finished",
             Match.kickoff < before,
-            (
-                ((Match.home_team_id == home_id) & (Match.away_team_id == away_id))
-                | ((Match.home_team_id == away_id) & (Match.away_team_id == home_id))
-            ),
+            Match.home_score.isnot(None),
+            or_(
+                and_(Match.home_team_id == home_id, Match.away_team_id == away_id),
+                and_(Match.home_team_id == away_id, Match.away_team_id == home_id),
+            )
         ).order_by(Match.kickoff.desc()).limit(n).all()
 
         if not matches:
-            return {
-                "home_wins": 0, "draws": 0, "away_wins": 0,
-                "home_goals_avg": 1.2, "away_goals_avg": 1.0, "btts_rate": 0.5,
-            }
+            return {"total": 0, "home_wins": 0, "draws": 0, "away_wins": 0,
+                    "home_goals_avg": 1.2, "away_goals_avg": 1.0, "btts_rate": 0.5}
 
-        hw, draws, aw = 0, 0, 0
-        hg_sum, ag_sum, btts = 0, 0, 0
-
+        hw, draws, aw, hg, ag = 0, 0, 0, 0, 0
         for m in matches:
-            hg = (m.home_score or 0) if m.home_team_id == home_id else (m.away_score or 0)
-            ag = (m.away_score or 0) if m.away_team_id == away_id else (m.home_score or 0)
-            hg_sum += hg
-            ag_sum += ag
-            if hg > 0 and ag > 0:
-                btts += 1
-            if hg > ag:
-                hw += 1
-            elif hg == ag:
-                draws += 1
+            if m.home_team_id == home_id:
+                g_h, g_a = m.home_score or 0, m.away_score or 0
             else:
-                aw += 1
+                g_h, g_a = m.away_score or 0, m.home_score or 0
+            hg += g_h; ag += g_a
+            if g_h > g_a: hw += 1
+            elif g_h == g_a: draws += 1
+            else: aw += 1
 
-        n_actual = len(matches)
+        n_real = len(matches)
         return {
-            "home_wins":      hw / n_actual,
-            "draws":          draws / n_actual,
-            "away_wins":      aw / n_actual,
-            "home_goals_avg": hg_sum / n_actual,
-            "away_goals_avg": ag_sum / n_actual,
-            "btts_rate":      btts / n_actual,
+            "total": n_real,
+            "home_wins": hw, "draws": draws, "away_wins": aw,
+            "home_goals_avg": hg / n_real,
+            "away_goals_avg": ag / n_real,
+            "btts_rate": sum(1 for m in matches if (m.home_score or 0) > 0 and (m.away_score or 0) > 0) / n_real,
         }
 
-    def _get_season_stats(self, db, team_id: int, before: datetime) -> dict:
-        """xG medio stagionale di una squadra."""
-        season_start = before.replace(month=8, day=1)
-        if before.month < 8:
-            season_start = season_start.replace(year=before.year - 1)
+    def _get_standing(self, db, team_id, comp_id, before) -> dict:
+        """Posizione in classifica nella stagione corrente."""
+        if not comp_id:
+            return {"position": 0, "pts": 0}
 
+        if before.month >= 7:
+            season_start = datetime(before.year, 7, 1)
+        else:
+            season_start = datetime(before.year - 1, 7, 1)
+
+        from sqlalchemy import or_
+        all_teams_matches = {}
         matches = db.query(Match).filter(
+            Match.competition_id == comp_id,
             Match.status == "finished",
             Match.kickoff >= season_start,
             Match.kickoff < before,
-            (Match.home_team_id == team_id) | (Match.away_team_id == team_id),
+            Match.home_score.isnot(None),
         ).all()
 
-        if not matches:
-            return {"xg_per_match": 1.2, "xga_per_match": 1.2}
-
-        xg_sum, xga_sum = 0.0, 0.0
         for m in matches:
-            if m.home_team_id == team_id:
-                xg_sum  += m.home_xg or m.home_score or 1.2
-                xga_sum += m.away_xg or m.away_score or 1.2
-            else:
-                xg_sum  += m.away_xg or m.away_score or 1.2
-                xga_sum += m.home_xg or m.home_score or 1.2
+            for tid in [m.home_team_id, m.away_team_id]:
+                if tid not in all_teams_matches:
+                    all_teams_matches[tid] = 0
+                is_home = m.home_team_id == tid
+                g_for = (m.home_score or 0) if is_home else (m.away_score or 0)
+                g_ag = (m.away_score or 0) if is_home else (m.home_score or 0)
+                if g_for > g_ag: all_teams_matches[tid] += 3
+                elif g_for == g_ag: all_teams_matches[tid] += 1
 
-        n = len(matches)
-        return {
-            "xg_per_match":  round(xg_sum / n, 2),
-            "xga_per_match": round(xga_sum / n, 2),
-        }
+        if not all_teams_matches:
+            return {"position": 0, "pts": 0}
 
-    def _days_since_last_match(self, db, team_id: int, before: datetime) -> float:
-        last = db.query(Match).filter(
-            Match.status == "finished",
-            Match.kickoff < before,
-            (Match.home_team_id == team_id) | (Match.away_team_id == team_id),
-        ).order_by(Match.kickoff.desc()).first()
+        sorted_teams = sorted(all_teams_matches.items(), key=lambda x: -x[1])
+        for i, (tid, pts) in enumerate(sorted_teams, 1):
+            if tid == team_id:
+                return {"position": i, "pts": pts}
 
-        if not last or not last.kickoff:
-            return 7.0
-        return min((before - last.kickoff).days, 30)
+        return {"position": len(sorted_teams) + 1, "pts": 0}
 
-    def _lineup_strength(self, db, match_id: int, team_id: int) -> float:
-        """
-        Stima la forza della formazione basandosi sui minuti totali giocati
-        dagli 11 titolari (proxy per esperienza/forma).
-        """
-        from sqlalchemy import func
-
-        lineup = db.query(Lineup).filter_by(
-            match_id=match_id,
-            team_id=team_id,
-        ).order_by(Lineup.is_official.desc()).first()
-
-        if not lineup:
-            return 0.5
-
-        starters = db.query(LineupPlayer).filter_by(
-            lineup_id=lineup.id,
-            role="starter",
-        ).all()
-
-        if not starters:
-            return 0.5
-
-        total_minutes = 0
-        for lp in starters:
-            if lp.player_id:
-                stats = db.query(PlayerStats).filter_by(
-                    player_id=lp.player_id
-                ).order_by(PlayerStats.season.desc()).first()
-                if stats:
-                    total_minutes += stats.minutes or 0
-
-        # Normalizza: ~900 min per giocatore = full season ~ 9000 totale
-        return min(total_minutes / 9000.0, 1.0)
-
-    def _count_key_injuries(self, db, team_id: int) -> int:
-        """Conta giocatori chiave infortunati (per questa squadra)."""
-        injured = db.query(Injury).join(Player).filter(
+    def _count_injuries(self, db, team_id) -> int:
+        from db.models import Player
+        return min(db.query(Injury).join(Player).filter(
             Player.team_id == team_id,
-            Injury.is_active == True,
-        ).count()
-        return min(injured, 5)
+            Injury.is_active == True
+        ).count(), 5)
 
     # ─────────────────────────────────────────────────────────
-    # POISSON — RISULTATI ESATTI
+    # POISSON
     # ─────────────────────────────────────────────────────────
-
-    def _estimate_goal_rates(self, features: pd.Series) -> tuple[float, float]:
-        """
-        Stima il lambda (gol attesi) per home e away usando il modello Poisson
-        o un calcolo diretto dalle feature se il modello non è addestrato.
-        """
-        if self.goals_model:
-            return self.goals_model.predict(features)
-
-        # Fallback diretto: media xG ponderata
-        home_xg  = float(features.get("home_xg_season", 1.3))
-        away_xga = float(features.get("away_xga_season", 1.2))
-        away_xg  = float(features.get("away_xg_season", 1.1))
-        home_xga = float(features.get("home_xga_season", 1.1))
-
-        home_lambda = (home_xg * 0.6 + away_xga * 0.4)
-        away_lambda = (away_xg * 0.6 + home_xga * 0.4)
-
-        # Aggiusta con form
-        form_diff = float(features.get("form_diff", 0))
-        home_lambda *= 1 + form_diff * 0.02
-        away_lambda *= 1 - form_diff * 0.02
-
-        return max(0.3, home_lambda), max(0.3, away_lambda)
 
     @staticmethod
-    def _poisson_score_probs(
-        home_lambda: float, away_lambda: float, max_goals: int = 6
-    ) -> dict:
-        """
-        Probabilità di ogni risultato esatto usando distribuzione di Poisson bivariata.
-        Ritorna dict {"0-0": prob, "1-0": prob, ...} ordinato per prob decrescente.
-        """
+    def _poisson_score_probs(hl: float, al: float, max_g: int = 5) -> dict:
         from scipy.stats import poisson
-
         probs = {}
-        for h in range(max_goals + 1):
-            for a in range(max_goals + 1):
-                p = poisson.pmf(h, home_lambda) * poisson.pmf(a, away_lambda)
+        for h in range(max_g + 1):
+            for a in range(max_g + 1):
+                p = poisson.pmf(h, hl) * poisson.pmf(a, al)
                 probs[f"{h}-{a}"] = round(float(p) * 100, 2)
-
-        # Ordina e prendi top 10
-        sorted_scores = sorted(probs.items(), key=lambda x: -x[1])
-        return {s: p for s, p in sorted_scores[:10]}
+        return dict(sorted(probs.items(), key=lambda x: -x[1])[:8])
 
     @staticmethod
-    def _calc_btts(home_lambda: float, away_lambda: float) -> float:
-        """P(home scores ≥ 1) × P(away scores ≥ 1)."""
+    def _calc_btts(hl: float, al: float) -> float:
         from scipy.stats import poisson
-        p_home_scores = 1 - poisson.pmf(0, home_lambda)
-        p_away_scores = 1 - poisson.pmf(0, away_lambda)
-        return float(p_home_scores * p_away_scores)
+        return float((1 - poisson.pmf(0, hl)) * (1 - poisson.pmf(0, al)))
 
     @staticmethod
-    def _calc_over_n5(home_lambda: float, away_lambda: float, threshold: float) -> float:
-        """P(total goals > threshold) via Poisson."""
+    def _calc_over(hl: float, al: float, threshold: float) -> float:
         from scipy.stats import poisson
-        prob_under = 0.0
-        for total in range(int(threshold) + 1):
-            for h in range(total + 1):
-                a = total - h
-                prob_under += poisson.pmf(h, home_lambda) * poisson.pmf(a, away_lambda)
-        return 1.0 - float(prob_under)
+        under = sum(
+            poisson.pmf(h, hl) * poisson.pmf(t - h, al)
+            for t in range(int(threshold) + 1)
+            for h in range(t + 1)
+        )
+        return 1.0 - float(under)
 
     # ─────────────────────────────────────────────────────────
     # MARCATORI E AMMONITI
     # ─────────────────────────────────────────────────────────
 
-    def _predict_scorers(
-        self, match_id: int, home_lambda: float, away_lambda: float
-    ) -> list[dict]:
-        """
-        Calcola la probabilità che ogni giocatore in formazione segni.
-        Formula: P(segna) = (xG_individuale / xG_squadra) × P(squadra segna ≥ 1)
-        """
+    def _predict_scorers(self, db, match_id, home_lambda, away_lambda) -> list:
         from scipy.stats import poisson
+        from sqlalchemy import or_
 
         result = []
-        with get_db_session() as db:
-            for is_home, lambda_val in [(True, home_lambda), (False, away_lambda)]:
-                team_id = db.query(Match).filter_by(id=match_id).first()
-                if not team_id:
+        match = db.query(Match).filter_by(id=match_id).first()
+        if not match:
+            return []
+
+        for is_home, lam, team_id in [
+            (True, home_lambda, match.home_team_id),
+            (False, away_lambda, match.away_team_id)
+        ]:
+            lineup = db.query(Lineup).filter_by(
+                match_id=match_id, team_id=team_id
+            ).order_by(Lineup.is_official.desc()).first()
+
+            if not lineup:
+                continue
+
+            starters = db.query(LineupPlayer).filter_by(
+                lineup_id=lineup.id, role="starter"
+            ).all()
+
+            p_team = float(1 - poisson.pmf(0, lam))
+
+            for lp in starters:
+                if not lp.player_id:
                     continue
-                team_id = team_id.home_team_id if is_home else team_id.away_team_id
-
-                lineup = db.query(Lineup).filter_by(
-                    match_id=match_id,
-                    team_id=team_id,
-                ).order_by(Lineup.is_official.desc()).first()
-
-                if not lineup:
+                pos = (lp.position or "").upper()
+                if pos in ("GK", "G"):
                     continue
 
-                starters = db.query(LineupPlayer).filter_by(
-                    lineup_id=lineup.id,
-                    role="starter",
-                ).all()
+                # Gol per partita dallo storico
+                stats = db.query(PlayerStats).filter_by(
+                    player_id=lp.player_id
+                ).order_by(PlayerStats.season.desc()).first()
 
-                p_team_scores = 1 - poisson.pmf(0, lambda_val)
+                if stats and stats.appearances and stats.appearances > 0:
+                    gpm = (stats.goals or 0) / stats.appearances
+                    xg = (stats.xg or gpm) / max(stats.appearances, 1)
+                else:
+                    defaults = {"CF": 0.35, "LW": 0.20, "RW": 0.20, "AM": 0.15,
+                                "CM": 0.08, "DM": 0.04, "CB": 0.03, "LB": 0.04, "RB": 0.04}
+                    gpm = defaults.get(pos[:2], 0.10)
+                    xg = gpm
 
-                for lp in starters:
-                    if not lp.player or not lp.player_id:
-                        continue
+                p_score = min(0.95, xg * p_team * 1.3)
+                if p_score < 0.04:
+                    continue
 
-                    player = lp.player
-                    # Ignora portieri
-                    pos = (lp.position or player.position or "").upper()
-                    if "GK" in pos or "G" == pos:
-                        continue
+                player = lp.player
+                result.append({
+                    "player_id": lp.player_id,
+                    "name": player.name if player else "N/D",
+                    "team_id": team_id,
+                    "prob": round(p_score * 100, 1),
+                })
 
-                    # Gol per partita dallo storico
-                    stats = db.query(PlayerStats).filter_by(
-                        player_id=lp.player_id
-                    ).order_by(PlayerStats.season.desc()).first()
-
-                    if stats and stats.appearances and stats.appearances > 0:
-                        gpm = (stats.goals or 0) / stats.appearances
-                        xg_pm = (stats.xg or gpm) / max(stats.appearances, 1)
-                    else:
-                        # Default per ruolo
-                        defaults = {"CF": 0.35, "LW": 0.20, "RW": 0.20,
-                                    "AM": 0.15, "CM": 0.08, "DM": 0.04,
-                                    "CB": 0.03, "LB": 0.04, "RB": 0.04}
-                        gpm  = defaults.get(pos[:2], 0.10)
-                        xg_pm = gpm
-
-                    # Probabilità che segni in questa partita
-                    p_score = min(0.95, xg_pm * p_team_scores * 1.2)
-                    if p_score < 0.03:
-                        continue
-
-                    result.append({
-                        "player_id": lp.player_id,
-                        "name":      player.name,
-                        "team_id":   team_id,
-                        "position":  pos,
-                        "prob":      round(p_score * 100, 1),
-                    })
-
-        # Ordina per probabilità
         result.sort(key=lambda x: -x["prob"])
         return result[:10]
 
-    def _predict_bookings(self, match_id: int) -> list[dict]:
-        """
-        Calcola la probabilità che ogni giocatore prenda un cartellino giallo.
-        Basato su: yellow_cards / appearances nello storico.
-        """
+    def _predict_bookings(self, db, match_id) -> list:
         result = []
-        with get_db_session() as db:
-            match = db.query(Match).filter_by(id=match_id).first()
-            if not match:
-                return []
+        match = db.query(Match).filter_by(id=match_id).first()
+        if not match:
+            return []
 
-            for team_id in [match.home_team_id, match.away_team_id]:
-                lineup = db.query(Lineup).filter_by(
-                    match_id=match_id,
-                    team_id=team_id,
-                ).order_by(Lineup.is_official.desc()).first()
+        for team_id in [match.home_team_id, match.away_team_id]:
+            lineup = db.query(Lineup).filter_by(
+                match_id=match_id, team_id=team_id
+            ).order_by(Lineup.is_official.desc()).first()
+            if not lineup:
+                continue
 
-                if not lineup:
+            for lp in db.query(LineupPlayer).filter_by(lineup_id=lineup.id, role="starter").all():
+                if not lp.player_id:
+                    continue
+                stats = db.query(PlayerStats).filter_by(
+                    player_id=lp.player_id
+                ).order_by(PlayerStats.season.desc()).first()
+
+                if stats and stats.appearances and stats.appearances > 0:
+                    ypm = (stats.yellow_cards or 0) / stats.appearances
+                else:
+                    pos = (lp.position or "").upper()
+                    defaults = {"DM": 0.22, "CM": 0.18, "CB": 0.16, "LB": 0.14, "RB": 0.14}
+                    ypm = defaults.get(pos[:2], 0.12)
+
+                if ypm < 0.05:
                     continue
 
-                starters = db.query(LineupPlayer).filter_by(
-                    lineup_id=lineup.id,
-                    role="starter",
-                ).all()
-
-                for lp in starters:
-                    if not lp.player_id:
-                        continue
-
-                    player = lp.player
-                    stats = db.query(PlayerStats).filter_by(
-                        player_id=lp.player_id
-                    ).order_by(PlayerStats.season.desc()).first()
-
-                    if stats and stats.appearances and stats.appearances > 0:
-                        ypm = (stats.yellow_cards or 0) / stats.appearances
-                    else:
-                        pos = (lp.position or "").upper()
-                        # Centrocampisti e difensori prendono più gialli
-                        ypm_defaults = {
-                            "DM": 0.22, "CM": 0.18, "CB": 0.16,
-                            "LB": 0.14, "RB": 0.14, "AM": 0.14,
-                            "LW": 0.10, "RW": 0.10, "CF": 0.10,
-                        }
-                        ypm = ypm_defaults.get(pos[:2], 0.12)
-
-                    if ypm < 0.05:
-                        continue
-
-                    result.append({
-                        "player_id": lp.player_id,
-                        "name":      player.name if player else "Unknown",
-                        "team_id":   team_id,
-                        "prob":      round(min(ypm * 100, 65), 1),
-                    })
+                player = lp.player
+                result.append({
+                    "player_id": lp.player_id,
+                    "name": player.name if player else "N/D",
+                    "team_id": team_id,
+                    "prob": round(min(ypm * 100, 60), 1),
+                })
 
         result.sort(key=lambda x: -x["prob"])
         return result[:8]
 
     # ─────────────────────────────────────────────────────────
-    # POISSON MODEL (fit semplice)
+    # ML (quando addestrato)
     # ─────────────────────────────────────────────────────────
 
-    def _fit_poisson_model(self, X_rows, home_goals, away_goals):
-        """
-        Modello semplice di Poisson per stimare i gol attesi.
-        In una versione avanzata si può usare Dixon-Coles o SciPy minimize.
-        Per ora: regressione di Poisson via scikit-learn.
-        """
+    def build_match_features(self, match_id: int) -> Optional[pd.Series]:
+        with get_db_session() as db:
+            match = db.query(Match).filter_by(id=match_id).first()
+            if not match or not match.kickoff:
+                return None
+            home_id = match.home_team_id
+            away_id = match.away_team_id
+            now = match.kickoff
+
+            h2h = self._get_h2h(db, home_id, away_id, now)
+            hf = self._get_form(db, home_id, now, n=10)
+            af = self._get_form(db, away_id, now, n=10)
+            hhf = self._get_form(db, home_id, now, n=6, venue="home")
+            aaf = self._get_form(db, away_id, now, n=6, venue="away")
+            hs = self._get_standing(db, home_id, match.competition_id, now)
+            as_ = self._get_standing(db, away_id, match.competition_id, now)
+            hi = self._count_injuries(db, home_id)
+            ai = self._count_injuries(db, away_id)
+
+            odds = db.query(Odds).filter_by(match_id=match_id, market="1x2", bookmaker="average").first()
+
+            f = {
+                "home_ppm": hf["ppm"], "away_ppm": af["ppm"],
+                "home_gf": hf["gf_per_match"], "away_gf": af["gf_per_match"],
+                "home_ga": hf["ga_per_match"], "away_ga": af["ga_per_match"],
+                "home_home_ppm": hhf["ppm"], "away_away_ppm": aaf["ppm"],
+                "home_pos": hs["position"], "away_pos": as_["position"],
+                "pos_diff": as_["position"] - hs["position"],
+                "h2h_home_rate": h2h["home_wins"] / max(h2h["total"], 1),
+                "h2h_draw_rate": h2h["draws"] / max(h2h["total"], 1),
+                "h2h_away_rate": h2h["away_wins"] / max(h2h["total"], 1),
+                "h2h_total": h2h["total"],
+                "home_injuries": hi, "away_injuries": ai,
+                "odds_impl_home": odds.impl_home if odds and odds.impl_home else 33.3,
+                "odds_impl_draw": odds.impl_draw if odds and odds.impl_draw else 33.3,
+                "odds_impl_away": odds.impl_away if odds and odds.impl_away else 33.3,
+            }
+            return pd.Series(f)
+
+    def _predict_with_ml(self, match_id, features) -> Optional[Prediction]:
+        X = features.values.reshape(1, -1)
+        probs = self.outcome_model.predict_proba(X)[0]
+        classes = self.outcome_model.classes_
+
+        prob_map = {c: p for c, p in zip(classes, probs)}
+        prob_home = round(float(prob_map.get(1, 0.33)) * 100, 1)
+        prob_draw = round(float(prob_map.get(0, 0.33)) * 100, 1)
+        prob_away = round(float(prob_map.get(2, 0.34)) * 100, 1)
+
+        # Normalizza
+        total = prob_home + prob_draw + prob_away
+        prob_home = round(prob_home / total * 100, 1)
+        prob_draw = round(prob_draw / total * 100, 1)
+        prob_away = round(100 - prob_home - prob_draw, 1)
+
+        # Usa regole per i dettagli (gol, marcatori ecc)
+        with get_db_session() as db:
+            match = db.query(Match).filter_by(id=match_id).first()
+            if not match:
+                return None
+            home_id, away_id = match.home_team_id, match.away_team_id
+            now = match.kickoff or datetime.utcnow()
+            hf = self._get_form(db, home_id, now, n=6, venue="home")
+            af = self._get_form(db, away_id, now, n=6, venue="away")
+            hl = max(0.3, (hf["gf_per_match"] + af["ga_per_match"]) / 2)
+            al = max(0.2, (af["gf_per_match"] + hf["ga_per_match"]) / 2)
+            score_probs = self._poisson_score_probs(hl, al)
+            btts = round(self._calc_btts(hl, al) * 100, 1)
+            over25 = round(self._calc_over(hl, al, 2.5) * 100, 1)
+            scorer_probs = self._predict_scorers(db, match_id, hl, al)
+            booked_probs = self._predict_bookings(db, match_id)
+
+        with get_db_session() as db:
+            pred = db.query(Prediction).filter_by(match_id=match_id).first()
+            if not pred:
+                pred = Prediction(match_id=match_id)
+                db.add(pred)
+            pred.prob_home = prob_home
+            pred.prob_draw = prob_draw
+            pred.prob_away = prob_away
+            pred.score_probs = score_probs
+            pred.scorer_probs = scorer_probs
+            pred.booked_probs = booked_probs
+            pred.btts_prob = btts
+            pred.over25_prob = over25
+            pred.model_version = "v2.0-xgboost"
+            pred.confidence = 0.85
+            pred.created_at = datetime.utcnow()
+
+        return pred
+
+    def train(self, min_matches: int = 50) -> dict:
         try:
-            from sklearn.linear_model import PoissonRegressor
-            from sklearn.preprocessing import StandardScaler
+            import xgboost as xgb
+            from sklearn.model_selection import train_test_split
+            from sklearn.metrics import accuracy_score
+        except ImportError as e:
+            return {"error": f"Missing dependency: {e}"}
 
-            X = np.array(X_rows)
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
+        X_rows, y = [], []
+        with get_db_session() as db:
+            finished = db.query(Match).filter(
+                Match.status == "finished",
+                Match.home_score.isnot(None),
+            ).all()
 
-            home_reg = PoissonRegressor(alpha=0.1, max_iter=300)
-            away_reg = PoissonRegressor(alpha=0.1, max_iter=300)
+        logger.info(f"Partite per training: {len(finished)}")
+        if len(finished) < min_matches:
+            return {"error": "insufficient_data", "available": len(finished)}
 
-            home_reg.fit(X_scaled, home_goals)
-            away_reg.fit(X_scaled, away_goals)
+        for m in finished:
+            try:
+                f = self.build_match_features(m.id)
+                if f is None:
+                    continue
+                hg = m.home_score or 0
+                ag = m.away_score or 0
+                if hg > ag: outcome = 1
+                elif hg == ag: outcome = 0
+                else: outcome = 2
+                X_rows.append(f.values)
+                y.append(outcome)
+            except Exception:
+                continue
 
-            class PoissonModel:
-                def __init__(self, h_reg, a_reg, scaler):
-                    self.home_reg = h_reg
-                    self.away_reg = a_reg
-                    self.scaler   = scaler
+        if len(X_rows) < min_matches:
+            return {"error": "insufficient_features", "available": len(X_rows)}
 
-                def predict(self, features: pd.Series):
-                    X = features.values.reshape(1, -1)
-                    X_s = self.scaler.transform(X)
-                    h = float(self.home_reg.predict(X_s)[0])
-                    a = float(self.away_reg.predict(X_s)[0])
-                    return max(0.3, h), max(0.2, a)
+        X = np.array(X_rows)
+        y_arr = np.array(y)
+        X_train, X_test, y_train, y_test = train_test_split(X, y_arr, test_size=0.2, random_state=42, stratify=y_arr)
 
-            return PoissonModel(home_reg, away_reg, scaler)
+        self.outcome_model = xgb.XGBClassifier(
+            n_estimators=300, max_depth=5, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8,
+            eval_metric="mlogloss", random_state=42,
+        )
+        self.outcome_model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+        acc = accuracy_score(y_test, self.outcome_model.predict(X_test))
+        self._save_models()
 
-        except Exception as e:
-            logger.warning(f"Poisson model fit fallito: {e}")
-            return None
-
-    # ─────────────────────────────────────────────────────────
-    # SAVE / LOAD MODELLI
-    # ─────────────────────────────────────────────────────────
+        return {"outcome_accuracy": round(acc, 3), "training_samples": len(X_rows), "model_version": "v2.0-xgboost"}
 
     def _save_models(self):
-        try:
-            if self.outcome_model:
-                with open(MODEL_DIR / "outcome_model.pkl", "wb") as f:
-                    pickle.dump(self.outcome_model, f)
-            if self.goals_model:
-                with open(MODEL_DIR / "goals_model.pkl", "wb") as f:
-                    pickle.dump(self.goals_model, f)
-            if self.booked_model:
-                with open(MODEL_DIR / "booked_model.pkl", "wb") as f:
-                    pickle.dump(self.booked_model, f)
-            logger.info(f"Modelli salvati in {MODEL_DIR}")
-        except Exception as e:
-            logger.error(f"Errore salvataggio modelli: {e}")
+        if self.outcome_model:
+            with open(MODEL_DIR / "outcome_model.pkl", "wb") as f:
+                pickle.dump(self.outcome_model, f)
 
     def _load_models(self):
-        for attr, filename in [
-            ("outcome_model", "outcome_model.pkl"),
-            ("goals_model",   "goals_model.pkl"),
-            ("booked_model",  "booked_model.pkl"),
-        ]:
-            path = MODEL_DIR / filename
-            if path.exists():
-                try:
-                    with open(path, "rb") as f:
-                        setattr(self, attr, pickle.load(f))
-                    logger.info(f"Modello {filename} caricato")
-                except Exception as e:
-                    logger.warning(f"Errore caricamento {filename}: {e}")
+        path = MODEL_DIR / "outcome_model.pkl"
+        if path.exists():
+            try:
+                with open(path, "rb") as f:
+                    self.outcome_model = pickle.load(f)
+                logger.info("Modello ML caricato")
+            except Exception as e:
+                logger.warning(f"Errore caricamento modello: {e}")
 
 
 predictor = FootballPredictor()
