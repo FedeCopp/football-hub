@@ -567,6 +567,51 @@ def train_ml(secret: str):
     return {"status": "started", "message": "Training ML avviato. Controlla i log Railway."}
 
 
+@app.api_route("/api/admin/recalc-all-predictions", methods=["GET","POST"])
+def recalc_all_predictions(secret: str):
+    """Cancella tutte le previsioni esistenti e le ricalcola con il nuovo modello."""
+    if secret != settings.SECRET_KEY:
+        raise HTTPException(403, "Non autorizzato")
+    import threading
+
+    def run():
+        import logging
+        logger = logging.getLogger("recalc")
+        from db.database import get_db_session
+        from db.models import Match, Prediction
+        from ml.predictor import FootballPredictor
+
+        # Cancella tutte le previsioni vecchie
+        with get_db_session() as db:
+            deleted = db.query(Prediction).delete()
+            logger.info(f"Previsioni cancellate: {deleted}")
+
+        # Ricalcola per tutte le partite (passate e future)
+        predictor = FootballPredictor()
+        with get_db_session() as db:
+            matches = db.query(Match).filter(
+                Match.home_score.isnot(None) | Match.status.in_(["scheduled", "timed"])
+            ).all()
+            ids = [m.id for m in matches]
+
+        logger.info(f"Ricalcolo previsioni per {len(ids)} partite...")
+        done = 0
+        for mid in ids:
+            try:
+                predictor.predict_match(mid)
+                done += 1
+                if done % 50 == 0:
+                    logger.info(f"Previsioni ricalcolate: {done}/{len(ids)}")
+            except Exception as e:
+                logger.debug(f"Skip match {mid}: {e}")
+
+        logger.info(f"Ricalcolo completato: {done} previsioni aggiornate")
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return {"status": "started", "message": "Ricalcolo tutte le previsioni avviato. Ci vorranno alcuni minuti."}
+
+
 @app.api_route("/api/admin/fix-match-status", methods=["GET","POST"])
 def fix_match_status(secret: str):
     """Corregge lo stato delle partite passate rimaste come 'live' o 'scheduled'."""
