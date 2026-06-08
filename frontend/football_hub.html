@@ -419,7 +419,54 @@ function renderMatches() {
 
   if (!list.length) { document.getElementById('matches-container').innerHTML = '<div style="color:var(--muted);padding:20px;font-size:14px">Nessuna partita trovata.</div>'; return; }
 
-  document.getElementById('matches-container').innerHTML = list.map(m => {
+  // Raggruppa per campionato, poi per giornata
+  const byComp = {};
+  list.forEach(m => {
+    const comp = m.competition || 'Altro';
+    if (!byComp[comp]) byComp[comp] = {};
+    const md = m.matchday || '—';
+    if (!byComp[comp][md]) byComp[comp][md] = [];
+    byComp[comp][md].push(m);
+  });
+
+  // Ordine campionati preferiti
+  const compOrder = ['Serie A', 'UEFA Champions League', 'Premier League', 'La Liga', 'Bundesliga', 'Ligue 1'];
+  const sortedComps = Object.keys(byComp).sort((a, b) => {
+    const ia = compOrder.findIndex(c => a.includes(c.split(' ')[0]));
+    const ib = compOrder.findIndex(c => b.includes(c.split(' ')[0]));
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  });
+
+  let html = '';
+  sortedComps.forEach(comp => {
+    const matchdays = Object.keys(byComp[comp]).sort((a, b) => {
+      const na = parseInt(a) || 999, nb = parseInt(b) || 999;
+      return nb - na; // giornate più recenti prima
+    });
+
+    html += `<div style="margin-bottom:24px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+        <div style="font-family:'Barlow Condensed',sans-serif;font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--acc)">${comp}</div>
+        <div style="flex:1;height:1px;background:rgba(0,230,118,.2)"></div>
+      </div>`;
+
+    matchdays.forEach(md => {
+      const mdMatches = byComp[comp][md];
+      if (md !== '—' && md !== 'undefined') {
+        html += `<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin-bottom:8px;padding-left:4px">Giornata ${md}</div>`;
+      }
+      mdMatches.forEach(m => { html += renderMatchCard(m); });
+    });
+
+    html += '</div>';
+  });
+
+  document.getElementById('matches-container').innerHTML = html;
+  return; // early return — skip il vecchio rendering
+
+  document.getElementById('matches-container').innerHTML = list.map(m => renderMatchCard(m)).join(''); }
+
+function renderMatchCard(m) { return (
     const kickoff = m.kickoff ? new Date(m.kickoff).toLocaleTimeString('it', {hour:'2-digit',minute:'2-digit'}) : '—';
     const isLive = ['live','in_play'].includes(m.status);
     const isFinished = m.status === 'finished';
@@ -454,7 +501,7 @@ function renderMatches() {
         <div class="info-label">Prob. ML + quote bookmaker come feature calibrativa</div>
       </div>
     </div>`;
-  }).join('');
+  ); };
 }
 
 function setMatchFilter(btn, f) {
