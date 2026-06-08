@@ -71,10 +71,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
-    max_age=3600,
+    max_age=86400,
 )
 
 app.include_router(chat_router)
@@ -467,7 +467,7 @@ def get_player_stats(player_id: int, db: Session = Depends(get_db)):
 # ADMIN / TRIGGER MANUALI
 # ─────────────────────────────────────────────────────────────
 
-@app.post("/api/admin/import")
+@app.api_route("/api/admin/import", methods=["GET","POST"])
 def trigger_import(secret: str, competition: str = "SA"):
     """Avvia import iniziale (solo con secret corretto)."""
     if secret != settings.SECRET_KEY:
@@ -477,7 +477,7 @@ def trigger_import(secret: str, competition: str = "SA"):
     return {"task_id": task.id, "status": "queued"}
 
 
-@app.post("/api/admin/sync-odds")
+@app.api_route("/api/admin/sync-odds", methods=["GET","POST"])
 def trigger_sync_odds(secret: str):
     if secret != settings.SECRET_KEY:
         raise HTTPException(403, "Non autorizzato")
@@ -486,7 +486,7 @@ def trigger_sync_odds(secret: str):
     return {"task_id": task.id, "status": "queued"}
 
 
-@app.post("/api/admin/update-predictions")
+@app.api_route("/api/admin/update-predictions", methods=["GET","POST"])
 def trigger_predictions(secret: str):
     if secret != settings.SECRET_KEY:
         raise HTTPException(403, "Non autorizzato")
