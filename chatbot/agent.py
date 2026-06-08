@@ -261,18 +261,27 @@ class FootballChatbot:
         return text.strip()
 
     async def chat_async(self, message: str) -> str:
-        try:
-            result = await self.executor.ainvoke({
-                "input": message,
-                "chat_history": self.chat_history[-16:],
-            })
-            output = self._clean(result.get("output", "Non ho capito la domanda."))
-            self.chat_history.append(HumanMessage(content=message))
-            self.chat_history.append(AIMessage(content=output))
-            return output
-        except Exception as e:
-            logger.error(f"Chat error [{self.session_id}]: {e}")
-            return f"Errore temporaneo: {str(e)[:150]}"
+        import asyncio
+        last_error = None
+        for attempt in range(3):  # max 3 tentativi
+            try:
+                if attempt > 0:
+                    await asyncio.sleep(2 * attempt)  # attendi prima di riprovare
+                result = await self.executor.ainvoke({
+                    "input": message,
+                    "chat_history": self.chat_history[-16:],
+                })
+                output = self._clean(result.get("output", "Non ho capito la domanda."))
+                self.chat_history.append(HumanMessage(content=message))
+                self.chat_history.append(AIMessage(content=output))
+                return output
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Chat tentativo {attempt+1} fallito [{self.session_id}]: {e}")
+                if "rate_limit" in str(e).lower():
+                    await asyncio.sleep(10)  # attendi di più per rate limit
+        logger.error(f"Chat fallita dopo 3 tentativi [{self.session_id}]: {last_error}")
+        return "Mi dispiace, il servizio AI è momentaneamente sovraccarico. Riprova tra qualche secondo."
 
     def clear_history(self):
         self.chat_history = []
