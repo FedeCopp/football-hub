@@ -469,30 +469,78 @@ def get_player_stats(player_id: int, db: Session = Depends(get_db)):
 
 @app.api_route("/api/admin/import", methods=["GET","POST"])
 def trigger_import(secret: str, competition: str = "SA"):
-    """Avvia import iniziale (solo con secret corretto)."""
+    """Avvia import iniziale direttamente (senza Celery worker)."""
     if secret != settings.SECRET_KEY:
         raise HTTPException(403, "Non autorizzato")
-    from tasks import initial_data_import
-    task = initial_data_import.delay()
-    return {"task_id": task.id, "status": "queued"}
+    import threading
+    from scraper.football_data_client import FootballDataClient
+
+    def run_import():
+        client = FootballDataClient()
+        competitions = ["SA", "CL", "PL"]
+        for comp in competitions:
+            try:
+                client.import_historical_matches(comp, seasons_back=3)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Import {comp} error: {e}")
+
+    thread = threading.Thread(target=run_import, daemon=True)
+    thread.start()
+    return {"status": "started", "message": "Import avviato in background. Controlla i log Railway."}
 
 
 @app.api_route("/api/admin/sync-odds", methods=["GET","POST"])
 def trigger_sync_odds(secret: str):
     if secret != settings.SECRET_KEY:
         raise HTTPException(403, "Non autorizzato")
-    from tasks import sync_all_odds
-    task = sync_all_odds.delay()
-    return {"task_id": task.id, "status": "queued"}
+    import threading
+    from scraper.odds_client import OddsClient
+
+    def run_sync():
+        client = OddsClient()
+        for comp in ["serie_a", "champions_league", "premier_league"]:
+            try:
+                client.sync_odds_for_competition(comp)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Odds sync {comp} error: {e}")
+
+    thread = threading.Thread(target=run_sync, daemon=True)
+    thread.start()
+    return {"status": "started", "message": "Sync quote avviato in background."}
 
 
 @app.api_route("/api/admin/update-predictions", methods=["GET","POST"])
 def trigger_predictions(secret: str):
     if secret != settings.SECRET_KEY:
         raise HTTPException(403, "Non autorizzato")
-    from tasks import update_all_predictions
-    task = update_all_predictions.delay()
-    return {"task_id": task.id, "status": "queued"}
+    import threading
+
+    def run_predictions():
+        from datetime import datetime, timedelta
+        from db.database import get_db_session
+        from db.models import Match
+        from ml.predictor import FootballPredictor
+        predictor = FootballPredictor()
+        now = datetime.utcnow()
+        with get_db_session() as db:
+            matches = db.query(Match).filter(
+                Match.kickoff >= now,
+                Match.kickoff <= now + timedelta(days=7),
+                Match.status == "scheduled",
+            ).all()
+            ids = [m.id for m in matches]
+        for mid in ids:
+            try:
+                predictor.predict_match(mid)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Prediction {mid} error: {e}")
+
+    thread = threading.Thread(target=run_predictions, daemon=True)
+    thread.start()
+    return {"status": "started", "message": "Calcolo previsioni avviato in background."}
 
 
 # ─── Avvio diretto ────────────────────────────────────────────
