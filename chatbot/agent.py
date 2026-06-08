@@ -9,7 +9,7 @@ from typing import Optional
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
-from langchain.memory import ConversationBufferWindowMemory
+from langchain_core.messages import HumanMessage, AIMessage
 
 from config import settings
 from db.database import get_db_session
@@ -240,9 +240,10 @@ class FootballChatbot:
     def __init__(self, session_id: str = "default"):
         self.session_id = session_id
         self.llm = build_llm()
-        self.memory = ConversationBufferWindowMemory(
-            k=8, memory_key="chat_history", return_messages=True
-        )
+        self.chat_history = []   # lista di HumanMessage/AIMessage
+        self._build_executor()
+
+    def _build_executor(self):
         prompt = ChatPromptTemplate.from_messages([
             ("system", get_system_prompt()),
             MessagesPlaceholder(variable_name="chat_history"),
@@ -251,7 +252,7 @@ class FootballChatbot:
         ])
         agent = create_tool_calling_agent(self.llm, ALL_TOOLS, prompt)
         self.executor = AgentExecutor(
-            agent=agent, tools=ALL_TOOLS, memory=self.memory,
+            agent=agent, tools=ALL_TOOLS,
             verbose=False, max_iterations=4, handle_parsing_errors=True,
         )
 
@@ -259,14 +260,19 @@ class FootballChatbot:
         try:
             result = await self.executor.ainvoke({
                 "input": message,
+                "chat_history": self.chat_history[-16:],  # ultimi 8 scambi
             })
-            return result.get("output", "Non ho capito la domanda.")
+            output = result.get("output", "Non ho capito la domanda.")
+            # Aggiorna history manualmente
+            self.chat_history.append(HumanMessage(content=message))
+            self.chat_history.append(AIMessage(content=output))
+            return output
         except Exception as e:
             logger.error(f"Chat error [{self.session_id}]: {e}")
             return f"Errore temporaneo: {str(e)[:150]}"
 
     def clear_history(self):
-        self.memory.clear()
+        self.chat_history = []
 
 
 class ChatSessionManager:
