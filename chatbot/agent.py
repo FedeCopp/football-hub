@@ -54,27 +54,51 @@ def build_llm():
 
 @tool
 def get_today_matches(league: str = "") -> str:
-    """Partite di oggi con orari e punteggi. Parametro opzionale: league."""
+    """Partite di oggi. Se non ci sono oggi, mostra le ultime partite recenti o le prossime."""
     from datetime import timedelta
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     tomorrow = today + timedelta(days=1)
+
+    def format_match(m):
+        home = m.home_team.short_name or m.home_team.name
+        away = m.away_team.short_name or m.away_team.name
+        d = m.kickoff.strftime("%d/%m %H:%M") if m.kickoff else "?"
+        if m.status == "finished":
+            return f"✅ {home} {m.home_score}-{m.away_score} {away} ({d})"
+        elif m.status in ("live", "in_play"):
+            return f"🔴 {home} {m.home_score or 0}-{m.away_score or 0} {away} (LIVE)"
+        else:
+            return f"⏰ {home} vs {away} ({d})"
+
     with get_db_session() as db:
-        query = db.query(Match).filter(Match.kickoff >= today, Match.kickoff < tomorrow)
-        matches = query.order_by(Match.kickoff).all()
-        if not matches:
-            return "Nessuna partita oggi."
-        result = []
-        for m in matches:
-            home = m.home_team.short_name or m.home_team.name
-            away = m.away_team.short_name or m.away_team.name
-            t = m.kickoff.strftime("%H:%M") if m.kickoff else "?"
-            if m.status == "finished":
-                result.append(f"✅ {home} {m.home_score}-{m.away_score} {away} (FT)")
-            elif m.status in ("live", "in_play"):
-                result.append(f"🔴 {home} {m.home_score or 0}-{m.away_score or 0} {away} (LIVE)")
-            else:
-                result.append(f"⏰ {home} vs {away} ore {t}")
-        return "\n".join(result)
+        # Prima prova oggi
+        matches = db.query(Match).filter(
+            Match.kickoff >= today, Match.kickoff < tomorrow
+        ).order_by(Match.kickoff).all()
+
+        if matches:
+            return "📅 Partite di oggi:\n" + "\n".join(format_match(m) for m in matches)
+
+        # Nessuna oggi — cerca le ultime 7 giorni
+        week_ago = today - timedelta(days=7)
+        recent = db.query(Match).filter(
+            Match.kickoff >= week_ago,
+            Match.kickoff < today,
+            Match.status == "finished"
+        ).order_by(Match.kickoff.desc()).limit(10).all()
+
+        if recent:
+            return "📅 Nessuna partita oggi. Ultime partite giocate:\n" + "\n".join(format_match(m) for m in recent)
+
+        # Cerca prossime partite
+        next_matches = db.query(Match).filter(
+            Match.kickoff > tomorrow
+        ).order_by(Match.kickoff).limit(10).all()
+
+        if next_matches:
+            return "📅 Nessuna partita oggi. Prossime partite in programma:\n" + "\n".join(format_match(m) for m in next_matches)
+
+        return "Nessuna partita trovata nel database."
 
 
 @tool
@@ -227,9 +251,16 @@ def get_system_prompt():
     from datetime import datetime
     now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
     return f"""Sei FootballHub AI, assistente esperto di calcio italiano.
-Usa SEMPRE i tools per rispondere — non inventare dati su partite, formazioni o mercato.
-Rispondi in italiano. Sii conciso e usa emoji per leggibilità.
-Data attuale: {now}"""
+
+REGOLE IMPORTANTI:
+- Usa SEMPRE i tools per rispondere — non usare mai la tua memoria per dati su partite, risultati, classifiche o mercato
+- Non mostrare mai tag XML come <function=...> o </function> nelle risposte
+- Rispondi sempre in italiano pulito
+- Data e ora attuale: {now}
+- Il database contiene la stagione Serie A 2025/2026 appena conclusa e Champions League 2025/2026
+- Se non ci sono partite oggi, usa get_standings per mostrare la classifica finale o cerca partite recenti
+
+Capacità: partite, formazioni, previsioni ML, calciomercato, infortuni, classifiche."""
 
 SYSTEM_PROMPT = get_system_prompt()
 
