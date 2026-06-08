@@ -516,6 +516,29 @@ def trigger_sync_odds(secret: str):
     return {"status": "started", "message": "Sync quote avviato in background."}
 
 
+@app.api_route("/api/admin/train-ml", methods=["GET","POST"])
+def train_ml(secret: str):
+    """Addestra il modello ML sui dati storici nel database."""
+    if secret != settings.SECRET_KEY:
+        raise HTTPException(403, "Non autorizzato")
+    import threading
+
+    def run_training():
+        import logging
+        logger = logging.getLogger("train_ml")
+        try:
+            from ml.predictor import FootballPredictor
+            predictor = FootballPredictor()
+            result = predictor.train(min_matches=50)
+            logger.info(f"Training completato: {result}")
+        except Exception as e:
+            logger.error(f"Training error: {e}")
+
+    thread = threading.Thread(target=run_training, daemon=True)
+    thread.start()
+    return {"status": "started", "message": "Training ML avviato. Controlla i log Railway."}
+
+
 @app.api_route("/api/admin/fix-match-status", methods=["GET","POST"])
 def fix_match_status(secret: str):
     """Corregge lo stato delle partite passate rimaste come 'live' o 'scheduled'."""
