@@ -394,9 +394,16 @@ function showToast(msg) {
 // MATCHES
 // ══════════════════════════════════════════════════════
 async function loadMatches() {
-  const data = await api('/api/matches?date_from=' + getDateStr(0) + '&date_to=' + getDateStr(7));
-  if (!data) { document.getElementById('matches-container').innerHTML = '<div class="error-msg">Backend non raggiungibile. Configura l\'URL nella sezione Setup.</div>'; return; }
+  document.getElementById('matches-container').innerHTML = '<div class="loading"><div class="spinner"></div>Caricamento partite...</div>';
+  let data = null;
+  for (let i = 0; i < 3; i++) {
+    data = await api('/api/matches?date_from=' + getDateStr(-60) + '&date_to=' + getDateStr(90));
+    if (data !== null) break;
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  if (!data) { document.getElementById('matches-container').innerHTML = '<div class="error-msg">Backend non raggiungibile. Riprova tra qualche secondo.</div>'; return; }
   allMatches = data;
+  if (!allMatches.length) { document.getElementById('matches-container').innerHTML = '<div style="color:var(--muted);padding:20px">Nessuna partita nel database. Avvia l\'import dalla sezione Setup.</div>'; return; }
   renderMatches();
 }
 
@@ -785,6 +792,18 @@ function getDateStr(daysOffset) {
   const d = new Date(); d.setDate(d.getDate() + daysOffset);
   return d.toISOString().split('T')[0];
 }
+
+// Keep-alive: ping ogni 8 minuti per evitare che Railway si addormenti
+setInterval(async () => {
+  try { await fetch(API_BASE + '/health'); } catch(e) {}
+}, 8 * 60 * 1000);
+
+// Auto-refresh partite ogni 5 minuti se la pagina è attiva
+setInterval(() => {
+  if (document.getElementById('page-matches').classList.contains('active')) {
+    loadMatches();
+  }
+}, 5 * 60 * 1000);
 </script>
 </body>
 </html>

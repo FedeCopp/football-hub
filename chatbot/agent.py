@@ -195,38 +195,69 @@ def get_injuries(team_name: str) -> str:
 
 @tool
 def get_standings(competition: str) -> str:
-    """Classifica di una competizione. Esempio: get_standings('Serie A')"""
+    """Classifica di una competizione per la stagione corrente. Esempio: get_standings('Serie A')"""
     from sqlalchemy import func
+    from datetime import datetime, timedelta
     with get_db_session() as db:
-        comp = db.query(Competition).filter(func.lower(Competition.name).contains(competition.lower())).first()
+        comp = db.query(Competition).filter(
+            func.lower(Competition.name).contains(competition.lower())
+        ).first()
         if not comp:
             return f"Competizione '{competition}' non trovata nel database."
+
+        # Determina stagione corrente: se siamo dopo luglio usa stagione corrente, altrimenti quella precedente
+        now = datetime.utcnow()
+        if now.month >= 7:
+            season_start = datetime(now.year, 7, 1)
+            season_end = datetime(now.year + 1, 6, 30)
+        else:
+            season_start = datetime(now.year - 1, 7, 1)
+            season_end = datetime(now.year, 6, 30)
+
         teams = db.query(Team).join(
             Match, (Match.home_team_id == Team.id) | (Match.away_team_id == Team.id)
-        ).filter(Match.competition_id == comp.id, Match.status == "finished").distinct().all()
+        ).filter(
+            Match.competition_id == comp.id,
+            Match.status == "finished",
+            Match.kickoff >= season_start,
+            Match.kickoff <= season_end,
+        ).distinct().all()
+
         standings = []
         for team in teams:
             matches = db.query(Match).filter(
-                Match.competition_id == comp.id, Match.status == "finished",
+                Match.competition_id == comp.id,
+                Match.status == "finished",
+                Match.kickoff >= season_start,
+                Match.kickoff <= season_end,
                 (Match.home_team_id == team.id) | (Match.away_team_id == team.id),
             ).all()
-            pts, gf, ga = 0, 0, 0
+            pts, gf, ga, w, d, l = 0, 0, 0, 0, 0, 0
             for m in matches:
                 gf_m = (m.home_score or 0) if m.home_team_id == team.id else (m.away_score or 0)
                 ga_m = (m.away_score or 0) if m.home_team_id == team.id else (m.home_score or 0)
                 gf += gf_m
                 ga += ga_m
                 if gf_m > ga_m:
-                    pts += 3
+                    pts += 3; w += 1
                 elif gf_m == ga_m:
-                    pts += 1
+                    pts += 1; d += 1
+                else:
+                    l += 1
             if matches:
-                standings.append({"team": team.short_name or team.name, "pts": pts, "gd": gf - ga, "played": len(matches)})
+                standings.append({
+                    "team": team.short_name or team.name,
+                    "pts": pts, "gd": gf - ga, "gf": gf, "ga": ga,
+                    "played": len(matches), "w": w, "d": d, "l": l
+                })
+
         if not standings:
-            return f"Nessun dato di classifica per {comp.name}."
-        standings.sort(key=lambda x: (-x["pts"], -x["gd"]))
-        return f"Classifica {comp.name}:\n" + "\n".join(
-            f"{i:2}. {s['team']:<20} {s['pts']}pt  {s['played']}G  ({s['gd']:+d})"
+            return f"Nessun dato per {comp.name} nella stagione corrente."
+
+        standings.sort(key=lambda x: (-x["pts"], -x["gd"], -x["gf"]))
+        season_label = f"{season_start.year}/{str(season_end.year)[2:]}"
+        return f"Classifica {comp.name} {season_label}:\n" + "\n".join(
+            f"{i:2}. {s['team']:<20} {s['pts']}pt  {s['played']}G  {s['w']}V {s['d']}P {s['l']}S  ({s['gd']:+d})"
             for i, s in enumerate(standings[:20], 1)
         )
 

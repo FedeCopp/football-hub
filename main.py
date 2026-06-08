@@ -511,6 +511,42 @@ def trigger_sync_odds(secret: str):
     return {"status": "started", "message": "Sync quote avviato in background."}
 
 
+@app.api_route("/api/admin/fix-match-status", methods=["GET","POST"])
+def fix_match_status(secret: str):
+    """Corregge lo stato delle partite passate rimaste come 'live' o 'scheduled'."""
+    if secret != settings.SECRET_KEY:
+        raise HTTPException(403, "Non autorizzato")
+    from datetime import datetime
+    from db.database import get_db_session
+    from db.models import Match
+
+    fixed = 0
+    now = datetime.utcnow()
+    with get_db_session() as db:
+        # Partite passate rimaste come live o scheduled
+        stale = db.query(Match).filter(
+            Match.kickoff < now,
+            Match.status.in_(["live", "in_play", "scheduled", "timed"]),
+            Match.home_score.isnot(None),
+        ).all()
+        for m in stale:
+            m.status = "finished"
+            fixed += 1
+
+        # Partite passate senza punteggio — marca come finished con score 0-0 se kickoff > 24h fa
+        from datetime import timedelta
+        old_no_score = db.query(Match).filter(
+            Match.kickoff < now - timedelta(hours=24),
+            Match.status.in_(["live", "in_play"]),
+            Match.home_score.is_(None),
+        ).all()
+        for m in old_no_score:
+            m.status = "finished"
+            fixed += 1
+
+    return {"status": "done", "fixed": fixed}
+
+
 @app.api_route("/api/admin/update-predictions", methods=["GET","POST"])
 def trigger_predictions(secret: str):
     if secret != settings.SECRET_KEY:

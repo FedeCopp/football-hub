@@ -201,41 +201,46 @@ class FootballDataClient:
                 logger.warning(f"Errore fetch stagione {year_from}: {e}")
                 continue
 
-            with get_db_session() as db:
-                for m in matches:
-                    ext_id = str(m["id"])
-                    if db.query(Match).filter_by(ext_id=ext_id).first():
-                        continue  # già presente
+            for m in matches:
+                ext_id = str(m["id"])
+                try:
+                    with get_db_session() as db:
+                        if db.query(Match).filter_by(ext_id=ext_id).first():
+                            continue  # già presente
 
-                    home = db.query(Team).filter_by(
-                        ext_id=str(m["homeTeam"]["id"])
-                    ).first()
-                    away = db.query(Team).filter_by(
-                        ext_id=str(m["awayTeam"]["id"])
-                    ).first()
+                        home = db.query(Team).filter_by(
+                            ext_id=str(m["homeTeam"]["id"])
+                        ).first()
+                        away = db.query(Team).filter_by(
+                            ext_id=str(m["awayTeam"]["id"])
+                        ).first()
 
-                    if not home or not away:
-                        continue
+                        if not home or not away:
+                            continue
 
-                    score = m.get("score", {})
-                    full  = score.get("fullTime", {})
-                    ht    = score.get("halfTime", {})
+                        score = m.get("score", {})
+                        full  = score.get("fullTime", {})
+                        ht    = score.get("halfTime", {})
 
-                    match = Match(
-                        ext_id=ext_id,
-                        competition_id=comp_id,
-                        home_team_id=home.id,
-                        away_team_id=away.id,
-                        matchday=m.get("matchday"),
-                        kickoff=self._parse_date(m.get("utcDate")),
-                        status=m.get("status", "FINISHED").lower(),
-                        home_score=full.get("home"),
-                        away_score=full.get("away"),
-                        home_ht=ht.get("home"),
-                        away_ht=ht.get("away"),
-                    )
-                    db.add(match)
-                    count += 1
+                        match = Match(
+                            ext_id=ext_id,
+                            competition_id=comp_id,
+                            home_team_id=home.id,
+                            away_team_id=away.id,
+                            matchday=m.get("matchday"),
+                            kickoff=self._parse_date(m.get("utcDate")),
+                            status=m.get("status", "FINISHED").lower(),
+                            home_score=full.get("home"),
+                            away_score=full.get("away"),
+                            home_ht=ht.get("home"),
+                            away_ht=ht.get("away"),
+                        )
+                        db.add(match)
+                        count += 1
+                except Exception as e:
+                    if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+                        continue  # partita già inserita da altro thread
+                    logger.warning(f"Skip match {ext_id}: {e}")
 
         logger.info(f"Importate {count} partite storiche per {competition_code}")
         return count
