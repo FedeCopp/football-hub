@@ -516,6 +516,34 @@ def trigger_sync_odds(secret: str):
     return {"status": "started", "message": "Sync quote avviato in background."}
 
 
+@app.api_route("/api/admin/scrape-transfers", methods=["GET","POST"])
+def scrape_transfers(secret: str):
+    """Avvia lo scraping delle notizie di mercato da tutte le fonti."""
+    if secret != settings.SECRET_KEY:
+        raise HTTPException(403, "Non autorizzato")
+    import threading
+
+    def run_scrape():
+        import logging
+        logger = logging.getLogger("scrape_transfers")
+        try:
+            from scraper.transfer_scraper import TransferScraper
+            scraper = TransferScraper()
+            count = scraper.scrape_all_sources()
+            logger.info(f"Scraping completato: {count} nuove notizie")
+            # Processa le notizie con NLP
+            from nlp.transfer_analyzer import TransferAnalyzer
+            analyzer = TransferAnalyzer()
+            processed = analyzer.process_all_unprocessed(limit=200)
+            logger.info(f"NLP completato: {processed} transfer aggiornati")
+        except Exception as e:
+            logger.error(f"Scrape error: {e}")
+
+    thread = threading.Thread(target=run_scrape, daemon=True)
+    thread.start()
+    return {"status": "started", "message": "Scraping mercato avviato. Controlla i log Railway."}
+
+
 @app.api_route("/api/admin/train-ml", methods=["GET","POST"])
 def train_ml(secret: str):
     """Addestra il modello ML sui dati storici nel database."""
