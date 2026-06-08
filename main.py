@@ -203,9 +203,13 @@ def _serialize_match(match: Match, db: Session, detailed: bool = False) -> dict:
                     form.append("L")
         return form
 
+    # Previsione ML
+    pred_row = db.query(Prediction).filter_by(match_id=match.id).first()
+
     result = {
         "id": match.id,
         "competition": match.competition.name if match.competition else "",
+        "matchday": match.matchday,
         "home": {"id": home.id, "name": home.name, "short": home.short_name},
         "away": {"id": away.id, "name": away.name, "short": away.short_name},
         "kickoff": match.kickoff.isoformat() if match.kickoff else None,
@@ -228,6 +232,11 @@ def _serialize_match(match: Match, db: Session, detailed: bool = False) -> dict:
             "impl_draw": odds_row.impl_draw if odds_row else None,
             "impl_away": odds_row.impl_away if odds_row else None,
         },
+        "prediction": {
+            "home": round(float(pred_row.prob_home), 1) if pred_row and pred_row.prob_home and pred_row.prob_home != 33.3 else None,
+            "draw": round(float(pred_row.prob_draw), 1) if pred_row and pred_row.prob_draw and pred_row.prob_draw != 33.3 else None,
+            "away": round(float(pred_row.prob_away), 1) if pred_row and pred_row.prob_away and pred_row.prob_away != 33.3 else None,
+        } if pred_row else None,
     }
 
     if detailed:
