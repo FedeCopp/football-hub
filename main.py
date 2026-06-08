@@ -362,31 +362,36 @@ def get_transfers(
 def get_prediction(match_id: int, db: Session = Depends(get_db)):
     """Previsione ML per una partita."""
     pred = db.query(Prediction).filter_by(match_id=match_id).first()
+
     if not pred:
         # Genera al volo se non esiste
         try:
-            from ml.predictor import predictor
-            pred = predictor.predict_match(match_id)
+            from ml.predictor import FootballPredictor
+            predictor = FootballPredictor()
+            predictor.predict_match(match_id)
+            # Ricarica dalla sessione corrente
+            pred = db.query(Prediction).filter_by(match_id=match_id).first()
         except Exception as e:
             raise HTTPException(503, f"Previsione non disponibile: {e}")
 
     if not pred:
         raise HTTPException(404, "Previsione non trovata")
 
+    # Leggi tutti i valori DENTRO la sessione prima di restituire
     return {
         "match_id": match_id,
         "outcome": {
-            "home": pred.prob_home,
-            "draw": pred.prob_draw,
-            "away": pred.prob_away,
+            "home": float(pred.prob_home or 33.3),
+            "draw": float(pred.prob_draw or 33.3),
+            "away": float(pred.prob_away or 33.3),
         },
-        "scores": pred.score_probs,
-        "scorers": pred.scorer_probs,
-        "booked": pred.booked_probs,
-        "btts": pred.btts_prob,
-        "over25": pred.over25_prob,
-        "model": pred.model_version,
-        "confidence": pred.confidence,
+        "scores": pred.score_probs or {},
+        "scorers": pred.scorer_probs or [],
+        "booked": pred.booked_probs or [],
+        "btts": float(pred.btts_prob or 0),
+        "over25": float(pred.over25_prob or 0),
+        "model": pred.model_version or "v1.0",
+        "confidence": float(pred.confidence or 0.5),
         "created_at": pred.created_at.isoformat() if pred.created_at else None,
     }
 
