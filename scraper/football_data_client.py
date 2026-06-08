@@ -123,9 +123,10 @@ class FootballDataClient:
 
     # ── Import DB ─────────────────────────────────────────────
 
-    def import_competition(self, code: str, season: str = "2023/24") -> Competition:
+    def import_competition(self, code: str, season: str = "2023/24") -> int:
         """
         Importa (o aggiorna) una competizione nel database.
+        Restituisce l'ID della competizione.
         """
         data = self.get_competition(code)
         with get_db_session() as db:
@@ -140,7 +141,7 @@ class FootballDataClient:
                 db.add(comp)
                 db.flush()
                 logger.info(f"Competizione importata: {comp.name}")
-            return comp
+            return comp.id
 
     def import_teams(self, competition_code: str) -> list[Team]:
         """
@@ -183,7 +184,7 @@ class FootballDataClient:
         now = datetime.utcnow()
 
         # Importa comp e team prima
-        comp = self.import_competition(competition_code)
+        comp_id = self.import_competition(competition_code)
         self.import_teams(competition_code)
 
         for i in range(seasons_back):
@@ -222,7 +223,7 @@ class FootballDataClient:
 
                     match = Match(
                         ext_id=ext_id,
-                        competition_id=comp.id,
+                        competition_id=comp_id,
                         home_team_id=home.id,
                         away_team_id=away.id,
                         matchday=m.get("matchday"),
