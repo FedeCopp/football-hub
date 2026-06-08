@@ -291,16 +291,34 @@ class FootballChatbot:
         try:
             result = await self.executor.ainvoke({
                 "input": message,
-                "chat_history": self.chat_history[-16:],  # ultimi 8 scambi
+                "chat_history": self.chat_history[-16:],
             })
             output = result.get("output", "Non ho capito la domanda.")
-            # Aggiorna history manualmente
+            # Rimuovi eventuali tag function rimasti nel testo
+            output = self._clean_output(output)
             self.chat_history.append(HumanMessage(content=message))
             self.chat_history.append(AIMessage(content=output))
             return output
         except Exception as e:
             logger.error(f"Chat error [{self.session_id}]: {e}")
             return f"Errore temporaneo: {str(e)[:150]}"
+
+    @staticmethod
+    def _clean_output(text: str) -> str:
+        """Rimuove tag function/tool call rimasti nel testo della risposta."""
+        import re
+        # Rimuovi blocchi <function=...>...</function>
+        text = re.sub(r'<function=[^>]+>\{[^}]*\}\s*</function>', '', text)
+        # Rimuovi function=xxx{"..."}
+        text = re.sub(r'function=\w+\{[^}]*\}', '', text)
+        # Rimuovi tag XML generici rimasti
+        text = re.sub(r'</?function[^>]*>', '', text)
+        # Rimuovi righe vuote multiple
+        text = re.sub(r'
+{3,}', '
+
+', text)
+        return text.strip()
 
     def clear_history(self):
         self.chat_history = []
