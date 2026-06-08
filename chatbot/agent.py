@@ -223,10 +223,15 @@ def get_standings(competition: str) -> str:
 
 # ─── Agent ───────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """Sei FootballHub AI, assistente esperto di calcio italiano.
+def get_system_prompt():
+    from datetime import datetime
+    now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+    return f"""Sei FootballHub AI, assistente esperto di calcio italiano.
 Usa SEMPRE i tools per rispondere — non inventare dati su partite, formazioni o mercato.
 Rispondi in italiano. Sii conciso e usa emoji per leggibilità.
-Data attuale: {current_datetime}"""
+Data attuale: {now}"""
+
+SYSTEM_PROMPT = get_system_prompt()
 
 ALL_TOOLS = [get_today_matches, get_lineup, get_prediction, get_transfers, get_injuries, get_standings]
 
@@ -239,7 +244,7 @@ class FootballChatbot:
             k=8, memory_key="chat_history", return_messages=True
         )
         prompt = ChatPromptTemplate.from_messages([
-            ("system", SYSTEM_PROMPT),
+            ("system", get_system_prompt()),
             MessagesPlaceholder(variable_name="chat_history"),
             ("human", "{input}"),
             MessagesPlaceholder(variable_name="agent_scratchpad"),
@@ -254,7 +259,6 @@ class FootballChatbot:
         try:
             result = await self.executor.ainvoke({
                 "input": message,
-                "current_datetime": datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC"),
             })
             return result.get("output", "Non ho capito la domanda.")
         except Exception as e:
