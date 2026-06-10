@@ -213,7 +213,7 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;font
     <div class="chat-messages" id="chat-messages">
       <div class="msg bot">
         <div class="msg-meta">FootballHub AI</div>
-        <div class="msg-bubble">Ciao! Sono il tuo assistente calcistico. Interrogo il database in tempo reale per formazioni, previsioni e rumors di mercato.\n\nCosa vuoi sapere?</div>
+        <div class="msg-bubble">Ciao! Sono il tuo assistente calcistico. Interrogo il database in tempo reale per formazioni, previsioni e rumors di mercato.<br><br>Cosa vuoi sapere?</div>
       </div>
     </div>
     <div class="quick-btns">
@@ -462,9 +462,7 @@ function renderMatches() {
   });
 
   document.getElementById('matches-container').innerHTML = html;
-  return; // early return — skip il vecchio rendering
-
-  document.getElementById('matches-container').innerHTML = list.map(m => renderMatchCard(m)).join(''); }
+}
 
 function renderMatchCard(m) {
   const kickoff = m.kickoff ? new Date(m.kickoff).toLocaleTimeString('it', {hour:'2-digit',minute:'2-digit'}) : '—';
@@ -473,11 +471,12 @@ function renderMatchCard(m) {
   const formH = (m.form?.home || []).map(f => `<div class="form-dot form-${f.toLowerCase()}">${f}</div>`).join('');
   const formA = (m.form?.away || []).map(f => `<div class="form-dot form-${f.toLowerCase()}">${f}</div>`).join('');
 
-  // Usa probabilità ML dal campo prediction, fallback su quote bookmaker
+  // Probabilità calcolate dallo storico (vedi ml/predictor.py) — nessuna quota bookmaker
   const pred = m.prediction || {};
-  const ph = pred.home ?? m.odds?.impl_home ?? 33;
-  const pd = pred.draw ?? m.odds?.impl_draw ?? 33;
-  const pa = pred.away ?? m.odds?.impl_away ?? 33;
+  const hasPred = pred.home != null && pred.draw != null && pred.away != null;
+  const ph = hasPred ? pred.home : 0;
+  const pd = hasPred ? pred.draw : 0;
+  const pa = hasPred ? pred.away : 0;
 
   const centerContent = isFinished
     ? `<div class="vs-time">${m.score.home}-${m.score.away}</div><div style="font-size:10px;color:var(--muted)">FT</div>`
@@ -485,8 +484,19 @@ function renderMatchCard(m) {
     ? `<div class="vs-time" style="color:var(--red)">${m.score.home||0}-${m.score.away||0}</div><div style="font-size:10px;color:var(--red)">LIVE</div>`
     : `<div class="vs-time">${kickoff}</div><div style="font-size:10px;color:var(--muted)">VS</div>`;
 
-  const label1 = m.odds?.home_win ? `1 · ${Math.round(ph)}% (${m.odds.home_win.toFixed(2)})` : `1 · ${Math.round(ph)}%`;
-  const label2 = m.odds?.away_win ? `2 · ${Math.round(pa)}% (${m.odds.away_win.toFixed(2)})` : `2 · ${Math.round(pa)}%`;
+  const predictionBlock = hasPred ? `
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:3px">
+        <span>1 · ${Math.round(ph)}%</span>
+        <span>X · ${Math.round(pd)}%</span>
+        <span>2 · ${Math.round(pa)}%</span>
+      </div>
+      <div class="odds-bar">
+        <div class="odds-seg odds-1" style="flex:${Math.round(ph)}">${Math.round(ph)}%</div>
+        <div class="odds-seg odds-x" style="flex:${Math.round(pd)}">${Math.round(pd)}%</div>
+        <div class="odds-seg odds-2" style="flex:${Math.round(pa)}">${Math.round(pa)}%</div>
+      </div>
+      <div class="info-label">Previsione basata su storico</div>` : `
+      <div class="info-label" style="padding:4px 0">Previsione non ancora disponibile</div>`;
 
   return `<div class="match-card" onclick="openMatchPred(${m.id})">
     <div class="match-header">
@@ -499,21 +509,9 @@ function renderMatchCard(m) {
       <div class="vs-block">${centerContent}</div>
       <div class="team-block" style="text-align:right"><div class="team-name">${m.away.short||m.away.name}</div><div class="team-form" style="justify-content:flex-end">${formA}</div></div>
     </div>
-    <div style="padding:0 20px 12px">
-      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:3px">
-        <span>${label1}</span>
-        <span>X · ${Math.round(pd)}%</span>
-        <span>${label2}</span>
-      </div>
-      <div class="odds-bar">
-        <div class="odds-seg odds-1" style="flex:${Math.round(ph)}">${Math.round(ph)}%</div>
-        <div class="odds-seg odds-x" style="flex:${Math.round(pd)}">${Math.round(pd)}%</div>
-        <div class="odds-seg odds-2" style="flex:${Math.round(pa)}">${Math.round(pa)}%</div>
-      </div>
-      <div class="info-label">${pred.home ? 'Previsione ML' : 'Quote bookmaker'}</div>
+    <div style="padding:0 20px 12px">${predictionBlock}
     </div>
   </div>`;
-}
 }
 
 function setMatchFilter(btn, f) {
@@ -713,11 +711,10 @@ function renderPrediction(pred, match) {
       <div class="card">
         <div class="card-title">Esito previsto</div>
         <div style="display:flex;gap:7px">
-          ${[{l:'1',v:pred.outcome.home,q:match.odds?.home_win},{l:'X',v:pred.outcome.draw,q:match.odds?.draw},{l:'2',v:pred.outcome.away,q:match.odds?.away_win}].map(o=>`
+          ${[{l:'1',v:pred.outcome.home},{l:'X',v:pred.outcome.draw},{l:'2',v:pred.outcome.away}].map(o=>`
             <div style="flex:1;text-align:center;padding:10px 6px;border-radius:8px;background:${o.v===maxProb?'rgba(0,230,118,.1)':'var(--bg3)'};border:1px solid ${o.v===maxProb?'rgba(0,230,118,.3)':'var(--border)'}">
               <div style="font-family:'Barlow Condensed',sans-serif;font-size:26px;font-weight:800;color:${o.v===maxProb?'var(--acc)':'var(--text)'}">${o.l}</div>
               <div style="font-size:17px;font-weight:700;color:${o.v===maxProb?'var(--acc)':'var(--muted)'}">${Math.round(o.v)}%</div>
-              ${o.q?`<div style="font-size:10px;color:var(--dim)">${o.q.toFixed(2)}</div>`:''}
             </div>`).join('')}
         </div>
         <div class="odds-bar" style="margin-top:10px">
@@ -737,13 +734,13 @@ function renderPrediction(pred, match) {
       </div>
       <div class="card">
         <div class="card-title">⚽ Marcatori probabili</div>
-        ${scorers.map((s,i)=>`<div class="stat-row"><span class="stat-label"><span style="color:var(--dim);font-family:'Barlow Condensed',sans-serif;font-size:18px;margin-right:8px">${i+1}</span>${s.name}</span><span class="stat-val" style="color:var(--green)">${Math.round(s.prob)}%</span></div>`).join('')}
+        ${scorers.length ? scorers.map((s,i)=>`<div class="stat-row"><span class="stat-label"><span style="color:var(--dim);font-family:'Barlow Condensed',sans-serif;font-size:18px;margin-right:8px">${i+1}</span>${s.name}</span><span class="stat-val" style="color:var(--green)">${Math.round(s.prob)}%</span></div>`).join('') : `<div style="color:var(--muted);font-size:13px">Dati storici giocatori non disponibili.</div>`}
       </div>
     </div>
     <div class="card">
       <div class="card-title">🟨 Ammoniti più probabili</div>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
-        ${booked.map(b=>`<div style="display:flex;align-items:center;gap:8px;background:var(--bg3);border-radius:6px;padding:8px 12px"><div style="width:11px;height:15px;background:var(--amber);border-radius:2px;flex-shrink:0"></div><div><div style="font-size:13px;font-weight:500">${b.name}</div></div><div style="font-size:13px;font-weight:700;color:var(--amber);margin-left:auto;padding-left:12px">${Math.round(b.prob)}%</div></div>`).join('')}
+        ${booked.length ? booked.map(b=>`<div style="display:flex;align-items:center;gap:8px;background:var(--bg3);border-radius:6px;padding:8px 12px"><div style="width:11px;height:15px;background:var(--amber);border-radius:2px;flex-shrink:0"></div><div><div style="font-size:13px;font-weight:500">${b.name}</div></div><div style="font-size:13px;font-weight:700;color:var(--amber);margin-left:auto;padding-left:12px">${Math.round(b.prob)}%</div></div>`).join('') : `<div style="color:var(--muted);font-size:13px">Dati storici giocatori non disponibili.</div>`}
       </div>
     </div>`;
 }

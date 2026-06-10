@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from db.database import get_db_session
-from db.models import Match, Team, Lineup, LineupPlayer, PlayerStats, Odds, Prediction, Injury, Competition
+from db.models import Match, Team, Lineup, LineupPlayer, PlayerStats, Player, Prediction, Injury, Competition
 
 logger = logging.getLogger(__name__)
 MODEL_DIR = Path(__file__).parent / "models"
@@ -62,14 +62,16 @@ class FootballPredictor:
 
     def _predict_with_rules(self, match_id, home_id, away_id, comp_id, kickoff) -> Optional[Prediction]:
         """
-        Calcola probabilità usando:
+        Calcola probabilità basandosi esclusivamente sullo storico:
         1. Scontri diretti storici
         2. Forma recente (ultimi 8 match)
         3. Posizione in classifica
         4. Rendimento casa/trasferta
         5. Differenza reti
-        6. Quote bookmaker (se disponibili)
-        7. Infortuni chiave
+        6. Infortuni chiave
+
+        Nota: nessuna dipendenza da quote bookmaker — le probabilità
+        derivano solo dal confronto tra partite precedenti e statistiche.
         """
         with get_db_session() as db:
             now = kickoff or datetime.utcnow()
@@ -95,11 +97,6 @@ class FootballPredictor:
             # ── 5. Infortuni ────────────────────────────────
             home_injuries = self._count_injuries(db, home_id)
             away_injuries = self._count_injuries(db, away_id)
-
-            # ── 6. Quote bookmaker ──────────────────────────
-            odds = db.query(Odds).filter_by(
-                match_id=match_id, market="1x2", bookmaker="average"
-            ).first()
 
             # ── Calcolo score ───────────────────────────────
             # Base: vantaggio casa (in media 45% vittorie home nel calcio)
@@ -147,12 +144,6 @@ class FootballPredictor:
             prob_draw = (draw_score / total) * 100
             prob_away = (away_score / total) * 100
 
-            # Blend con quote bookmaker se disponibili (peso 35%)
-            if odds and odds.impl_home and odds.impl_home != 33.3:
-                prob_home = prob_home * 0.65 + odds.impl_home * 0.35
-                prob_draw = prob_draw * 0.65 + odds.impl_draw * 0.35
-                prob_away = prob_away * 0.65 + odds.impl_away * 0.35
-
             # Normalizza
             total_prob = prob_home + prob_draw + prob_away
             prob_home = round((prob_home / total_prob) * 100, 1)
@@ -175,9 +166,10 @@ class FootballPredictor:
             scorer_probs = self._predict_scorers(db, match_id, home_lambda, away_lambda)
             booked_probs = self._predict_bookings(db, match_id)
 
-            # Confidence: alta se abbiamo molti dati
+            # Confidence: alta se abbiamo molti dati storici
             data_points = home_form["played"] + away_form["played"] + h2h["total"]
-            confidence = min(0.95, 0.3 + data_points * 0.02 + (0.15 if odds else 0))
+            has_standings = home_standing["position"] > 0 and away_standing["position"] > 0
+            confidence = min(0.95, 0.3 + data_points * 0.02 + (0.1 if has_standings else 0))
 
         # Salva
         with get_db_session() as db:
@@ -356,44 +348,67 @@ class FootballPredictor:
     # MARCATORI E AMMONITI
     # ─────────────────────────────────────────────────────────
 
+    def _get_squad_candidates(self, db, match_id, team_id) -> list:
+        """
+        Restituisce i giocatori da considerare per marcatori/ammoniti come
+        lista di tuple (player_id, name, position, ultime PlayerStats|None).
+
+        Usa la formazione (ufficiale o probabile) se già disponibile,
+        altrimenti ripiega sulla rosa ordinata per presenze nello storico,
+        cosi' le previsioni esistono anche prima che le formazioni vengano
+        scaricate.
+        """
+        lineup = db.query(Lineup).filter_by(
+            match_id=match_id, team_id=team_id
+        ).order_by(Lineup.is_official.desc()).first()
+
+        if lineup:
+            starters = db.query(LineupPlayer).filter_by(
+                lineup_id=lineup.id, role="starter"
+            ).all()
+            candidates = []
+            for lp in starters:
+                if not lp.player_id:
+                    continue
+                player = lp.player
+                pos = (lp.position or (player.position if player else "") or "").upper()
+                stats = db.query(PlayerStats).filter_by(
+                    player_id=lp.player_id
+                ).order_by(PlayerStats.season.desc()).first()
+                candidates.append((lp.player_id, player.name if player else "N/D", pos, stats))
+            if candidates:
+                return candidates
+
+        # Fallback: rosa della squadra ordinata per presenze nello storico
+        candidates = []
+        for player in db.query(Player).filter_by(team_id=team_id).all():
+            stats = db.query(PlayerStats).filter_by(
+                player_id=player.id
+            ).order_by(PlayerStats.season.desc()).first()
+            candidates.append((player.id, player.name, (player.position or "").upper(), stats))
+
+        candidates.sort(key=lambda c: (c[3].appearances or 0) if c[3] else 0, reverse=True)
+        return candidates[:11]
+
     def _predict_scorers(self, db, match_id, home_lambda, away_lambda) -> list:
         from scipy.stats import poisson
-        from sqlalchemy import or_
 
         result = []
         match = db.query(Match).filter_by(id=match_id).first()
         if not match:
             return []
 
-        for is_home, lam, team_id in [
-            (True, home_lambda, match.home_team_id),
-            (False, away_lambda, match.away_team_id)
+        for lam, team_id in [
+            (home_lambda, match.home_team_id),
+            (away_lambda, match.away_team_id)
         ]:
-            lineup = db.query(Lineup).filter_by(
-                match_id=match_id, team_id=team_id
-            ).order_by(Lineup.is_official.desc()).first()
-
-            if not lineup:
-                continue
-
-            starters = db.query(LineupPlayer).filter_by(
-                lineup_id=lineup.id, role="starter"
-            ).all()
-
             p_team = float(1 - poisson.pmf(0, lam))
 
-            for lp in starters:
-                if not lp.player_id:
-                    continue
-                pos = (lp.position or "").upper()
+            for player_id, name, pos, stats in self._get_squad_candidates(db, match_id, team_id):
                 if pos in ("GK", "G"):
                     continue
 
                 # Gol per partita dallo storico
-                stats = db.query(PlayerStats).filter_by(
-                    player_id=lp.player_id
-                ).order_by(PlayerStats.season.desc()).first()
-
                 if stats and stats.appearances and stats.appearances > 0:
                     gpm = (stats.goals or 0) / stats.appearances
                     xg = (stats.xg or gpm) / max(stats.appearances, 1)
@@ -407,10 +422,9 @@ class FootballPredictor:
                 if p_score < 0.04:
                     continue
 
-                player = lp.player
                 result.append({
-                    "player_id": lp.player_id,
-                    "name": player.name if player else "N/D",
+                    "player_id": player_id,
+                    "name": name,
                     "team_id": team_id,
                     "prob": round(p_score * 100, 1),
                 })
@@ -425,33 +439,19 @@ class FootballPredictor:
             return []
 
         for team_id in [match.home_team_id, match.away_team_id]:
-            lineup = db.query(Lineup).filter_by(
-                match_id=match_id, team_id=team_id
-            ).order_by(Lineup.is_official.desc()).first()
-            if not lineup:
-                continue
-
-            for lp in db.query(LineupPlayer).filter_by(lineup_id=lineup.id, role="starter").all():
-                if not lp.player_id:
-                    continue
-                stats = db.query(PlayerStats).filter_by(
-                    player_id=lp.player_id
-                ).order_by(PlayerStats.season.desc()).first()
-
+            for player_id, name, pos, stats in self._get_squad_candidates(db, match_id, team_id):
                 if stats and stats.appearances and stats.appearances > 0:
                     ypm = (stats.yellow_cards or 0) / stats.appearances
                 else:
-                    pos = (lp.position or "").upper()
                     defaults = {"DM": 0.22, "CM": 0.18, "CB": 0.16, "LB": 0.14, "RB": 0.14}
                     ypm = defaults.get(pos[:2], 0.12)
 
                 if ypm < 0.05:
                     continue
 
-                player = lp.player
                 result.append({
-                    "player_id": lp.player_id,
-                    "name": player.name if player else "N/D",
+                    "player_id": player_id,
+                    "name": name,
                     "team_id": team_id,
                     "prob": round(min(ypm * 100, 60), 1),
                 })
@@ -482,8 +482,6 @@ class FootballPredictor:
             hi = self._count_injuries(db, home_id)
             ai = self._count_injuries(db, away_id)
 
-            odds = db.query(Odds).filter_by(match_id=match_id, market="1x2", bookmaker="average").first()
-
             f = {
                 "home_ppm": hf["ppm"], "away_ppm": af["ppm"],
                 "home_gf": hf["gf_per_match"], "away_gf": af["gf_per_match"],
@@ -495,10 +493,10 @@ class FootballPredictor:
                 "h2h_draw_rate": h2h["draws"] / max(h2h["total"], 1),
                 "h2h_away_rate": h2h["away_wins"] / max(h2h["total"], 1),
                 "h2h_total": h2h["total"],
+                "h2h_home_goals_avg": h2h["home_goals_avg"],
+                "h2h_away_goals_avg": h2h["away_goals_avg"],
+                "h2h_btts_rate": h2h["btts_rate"],
                 "home_injuries": hi, "away_injuries": ai,
-                "odds_impl_home": odds.impl_home if odds and odds.impl_home else 33.3,
-                "odds_impl_draw": odds.impl_draw if odds and odds.impl_draw else 33.3,
-                "odds_impl_away": odds.impl_away if odds and odds.impl_away else 33.3,
             }
             return pd.Series(f)
 
