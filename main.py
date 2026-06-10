@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from db.database import get_db, init_db, health_check
-from db.models import Match, Team, Player, Lineup, LineupPlayer, Transfer, Prediction, Odds, Injury
+from db.models import Match, Team, Player, Lineup, LineupPlayer, Transfer, Prediction, Injury
 from api.chat_router import chat_router
 
 logging.basicConfig(level=logging.INFO)
@@ -172,11 +172,6 @@ def _serialize_match(match: Match, db: Session, detailed: bool = False) -> dict:
     home = match.home_team
     away = match.away_team
 
-    # Quote medie
-    odds_row = db.query(Odds).filter_by(
-        match_id=match.id, market="1x2", bookmaker="average"
-    ).first()
-
     # Forma ultima 5 partite
     def get_form(team_id: int) -> list[str]:
         recent = db.query(Match).filter(
@@ -223,14 +218,6 @@ def _serialize_match(match: Match, db: Session, detailed: bool = False) -> dict:
         "form": {
             "home": get_form(home.id),
             "away": get_form(away.id),
-        },
-        "odds": {
-            "home": odds_row.home_win if odds_row else None,
-            "draw": odds_row.draw if odds_row else None,
-            "away": odds_row.away_win if odds_row else None,
-            "impl_home": odds_row.impl_home if odds_row else None,
-            "impl_draw": odds_row.impl_draw if odds_row else None,
-            "impl_away": odds_row.impl_away if odds_row else None,
         },
         "prediction": {
             "home": round(float(pred_row.prob_home), 1) if pred_row and pred_row.prob_home and pred_row.prob_home != 33.3 else None,

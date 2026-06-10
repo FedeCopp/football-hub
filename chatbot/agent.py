@@ -390,6 +390,18 @@ class FootballChatbot:
         logger.error(f"Chat fallita [{self.session_id}]: {last_error}")
         return "Mi dispiace, servizio temporaneamente non disponibile. Riprova tra qualche secondo."
 
+    async def stream_response(self, message: str):
+        """
+        Versione streaming per l'endpoint SSE: genera prima la risposta
+        completa (con retry/cleaning di chat_async) e la restituisce
+        a piccoli blocchi, per un effetto "a comparsa" lato client.
+        """
+        import asyncio
+        response = await self.chat_async(message)
+        for i in range(0, len(response), 4):
+            yield response[i:i + 4]
+            await asyncio.sleep(0.02)
+
     def clear_history(self):
         self.chat_history = []
 
