@@ -66,34 +66,34 @@ PLAYER_NAME_PATTERNS = [
 
 class TransferAnalyzer:
 
-    def process_news_item(self, item: NewsItem) -> Optional[Transfer]:
+    def process_news_item(self, item: dict) -> Optional[Transfer]:
         """Processa una notizia e aggiorna/crea il Transfer nel DB."""
-        text = f"{item.title} {item.body}"
+        text = f"{item['title']} {item['body'] or ''}"
 
         player_name = self._extract_player(text)
         from_team   = self._extract_team(text, role="from")
         to_team     = self._extract_team(text, role="to")
 
         if not player_name:
-            self._mark_processed(item.id)
+            self._mark_processed(item["id"])
             return None
 
-        intensity  = self._score_intensity(text, item.source)
+        intensity  = self._score_intensity(text, item["source"])
         here_we_go = bool(re.search(r"here we go", text, re.I))
 
         transfer = self._upsert_transfer(
             player_name=player_name,
             from_team=from_team or "",
             to_team=to_team or "",
-            source=item.source,
+            source=item["source"],
             intensity=intensity,
             here_we_go=here_we_go,
-            news_url=item.url or "",
-            news_title=item.title or "",
-            published=item.published or datetime.utcnow(),
+            news_url=item["url"] or "",
+            news_title=item["title"] or "",
+            published=item["published"] or datetime.utcnow(),
         )
 
-        self._mark_processed(item.id)
+        self._mark_processed(item["id"])
         return transfer
 
     # ── Estrazione entità via regex ───────────────────────────
@@ -376,14 +376,21 @@ class TransferAnalyzer:
                 .limit(limit)
                 .all()
             )
+            items_data = [
+                {
+                    "id": i.id, "title": i.title, "body": i.body,
+                    "source": i.source, "url": i.url, "published": i.published,
+                }
+                for i in items
+            ]
 
         count = 0
-        for item in items:
+        for data in items_data:
             try:
-                if self.process_news_item(item):
+                if self.process_news_item(data):
                     count += 1
             except Exception as e:
-                logger.warning(f"Errore processing news {item.id}: {e}")
+                logger.warning(f"Errore processing news {data['id']}: {e}")
 
         logger.info(f"Processate {count} notizie")
         return count
