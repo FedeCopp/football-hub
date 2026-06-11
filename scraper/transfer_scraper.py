@@ -170,3 +170,6 @@ class TransferScraper:
                 saved = True
 
         return saved
+
+
+transfer_scraper = TransferScraper()

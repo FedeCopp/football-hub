@@ -55,7 +55,10 @@ ws_manager = WebSocketManager()
 async def lifespan(app: FastAPI):
     logger.info("⚽ FootballHub API avviato")
     init_db()
+    from scheduler import start_scheduler, stop_scheduler
+    start_scheduler()
     yield
+    stop_scheduler()
     logger.info("FootballHub API fermato")
 
 
