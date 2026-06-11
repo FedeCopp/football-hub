@@ -35,7 +35,6 @@ SOURCE_WEIGHTS = {
 RSS_FEEDS = {
     "gazzetta": "https://www.gazzetta.it/rss/calciomercato.xml",
     "tmw": "https://www.tuttomercatoweb.com/rss",
-    "calciomercato": "https://www.calciomercato.com/rss",
 }
 CONFIRMATION_PATTERNS = [
     r"official", r"confirmed", r"completed", r"signed",
@@ -106,7 +105,11 @@ class TransferScraper:
         return total
 
     def _scrape_rss_feed(self, source: str, url: str) -> int:
-        headers = {"User-Agent": settings.SCRAPER_USER_AGENT}
+        headers = {
+            "User-Agent": settings.SCRAPER_USER_AGENT,
+            "Accept": "application/rss+xml, application/xml, text/xml, */*",
+            "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+        }
         r = httpx.get(url, headers=headers, timeout=15, follow_redirects=True)
         r.raise_for_status()
 

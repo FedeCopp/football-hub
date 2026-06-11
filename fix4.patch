@@ -1,0 +1,112 @@
+From 32e0c274f6cf16d9849df11fe92f49af4af3ccfa Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 11 Jun 2026 15:34:22 +0000
+Subject: [PATCH] Fix crash NLP mercato (sessione SQLAlchemy chiusa) e feed RSS
+ rotti
+
+---
+ nlp/transfer_analyzer.py    | 31 +++++++++++++++++++------------
+ scraper/transfer_scraper.py |  7 +++++--
+ 2 files changed, 24 insertions(+), 14 deletions(-)
+
+diff --git a/nlp/transfer_analyzer.py b/nlp/transfer_analyzer.py
+index 73393c3..057c654 100644
+--- a/nlp/transfer_analyzer.py
++++ b/nlp/transfer_analyzer.py
+@@ -66,34 +66,34 @@ PLAYER_NAME_PATTERNS = [
+ 
+ class TransferAnalyzer:
+ 
+-    def process_news_item(self, item: NewsItem) -> Optional[Transfer]:
++    def process_news_item(self, item: dict) -> Optional[Transfer]:
+         """Processa una notizia e aggiorna/crea il Transfer nel DB."""
+-        text = f"{item.title} {item.body}"
++        text = f"{item['title']} {item['body'] or ''}"
+ 
+         player_name = self._extract_player(text)
+         from_team   = self._extract_team(text, role="from")
+         to_team     = self._extract_team(text, role="to")
+ 
+         if not player_name:
+-            self._mark_processed(item.id)
++            self._mark_processed(item["id"])
+             return None
+ 
+-        intensity  = self._score_intensity(text, item.source)
++        intensity  = self._score_intensity(text, item["source"])
+         here_we_go = bool(re.search(r"here we go", text, re.I))
+ 
+         transfer = self._upsert_transfer(
+             player_name=player_name,
+             from_team=from_team or "",
+             to_team=to_team or "",
+-            source=item.source,
++            source=item["source"],
+             intensity=intensity,
+             here_we_go=here_we_go,
+-            news_url=item.url or "",
+-            news_title=item.title or "",
+-            published=item.published or datetime.utcnow(),
++            news_url=item["url"] or "",
++            news_title=item["title"] or "",
++            published=item["published"] or datetime.utcnow(),
+         )
+ 
+-        self._mark_processed(item.id)
++        self._mark_processed(item["id"])
+         return transfer
+ 
+     # ── Estrazione entità via regex ───────────────────────────
+@@ -376,14 +376,21 @@ class TransferAnalyzer:
+                 .limit(limit)
+                 .all()
+             )
++            items_data = [
++                {
++                    "id": i.id, "title": i.title, "body": i.body,
++                    "source": i.source, "url": i.url, "published": i.published,
++                }
++                for i in items
++            ]
+ 
+         count = 0
+-        for item in items:
++        for data in items_data:
+             try:
+-                if self.process_news_item(item):
++                if self.process_news_item(data):
+                     count += 1
+             except Exception as e:
+-                logger.warning(f"Errore processing news {item.id}: {e}")
++                logger.warning(f"Errore processing news {data['id']}: {e}")
+ 
+         logger.info(f"Processate {count} notizie")
+         return count
+diff --git a/scraper/transfer_scraper.py b/scraper/transfer_scraper.py
+index b157ead..b86ca3d 100644
+--- a/scraper/transfer_scraper.py
++++ b/scraper/transfer_scraper.py
+@@ -35,7 +35,6 @@ SOURCE_WEIGHTS = {
+ RSS_FEEDS = {
+     "gazzetta": "https://www.gazzetta.it/rss/calciomercato.xml",
+     "tmw": "https://www.tuttomercatoweb.com/rss",
+-    "calciomercato": "https://www.calciomercato.com/rss",
+ }
+ CONFIRMATION_PATTERNS = [
+     r"official", r"confirmed", r"completed", r"signed",
+@@ -106,7 +105,11 @@ class TransferScraper:
+         return total
+ 
+     def _scrape_rss_feed(self, source: str, url: str) -> int:
+-        headers = {"User-Agent": settings.SCRAPER_USER_AGENT}
++        headers = {
++            "User-Agent": settings.SCRAPER_USER_AGENT,
++            "Accept": "application/rss+xml, application/xml, text/xml, */*",
++            "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
++        }
+         r = httpx.get(url, headers=headers, timeout=15, follow_redirects=True)
+         r.raise_for_status()
+ 
+-- 
+2.43.0
+
