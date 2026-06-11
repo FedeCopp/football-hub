@@ -1,0 +1,368 @@
+From 859eccb640c0bcb0ff489745fbcda81c6b828f08 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 11 Jun 2026 08:13:22 +0000
+Subject: [PATCH 1/2] Aggiungi scheduler in-process per sync automatico dati
+
+- Railway esegue solo l'API (Dockerfile -> uvicorn), quindi i job
+  Celery in tasks.py (beat/worker) non girano mai in produzione:
+  partite future, classifiche e mercato restavano sempre vuoti.
+- Nuovo scheduler.py (APScheduler BackgroundScheduler) avviato nel
+  lifespan di main.py: bootstrap storico se il DB e' vuoto, sync
+  partite live ogni 2', prossimo turno ogni 6h, scraping mercato
+  ogni 3h, ricalcolo previsioni ogni 6h.
+- football_data_client.py: import_historical_matches copriva solo
+  l'intervallo di stagione "now.year-1 -> now.year-06-30", quindi a
+  stagione conclusa (es. giugno) non recuperava mai le partite della
+  stagione successiva. Aggiunto import_upcoming_matches() che importa
+  le partite programmate nei prossimi N giorni indipendentemente dai
+  confini di stagione (e aggiorna stato/orario delle esistenti).
+- transfer_scraper.py: aggiunta istanza singleton transfer_scraper
+  mancante (usata da tasks.py, causava ImportError nel worker Celery).
+
+https://claude.ai/code/session_01AXmPEhmNiDNYzX7STvYGW8
+---
+ main.py                         |   3 +
+ scheduler.py                    | 130 ++++++++++++++++++++++++++++++++
+ scraper/football_data_client.py | 127 +++++++++++++++++++++----------
+ scraper/transfer_scraper.py     |   3 +
+ 4 files changed, 223 insertions(+), 40 deletions(-)
+ create mode 100644 scheduler.py
+
+diff --git a/main.py b/main.py
+index 111887d..95b10d6 100644
+--- a/main.py
++++ b/main.py
+@@ -55,7 +55,10 @@ ws_manager = WebSocketManager()
+ async def lifespan(app: FastAPI):
+     logger.info("⚽ FootballHub API avviato")
+     init_db()
++    from scheduler import start_scheduler, stop_scheduler
++    start_scheduler()
+     yield
++    stop_scheduler()
+     logger.info("FootballHub API fermato")
+ 
+ 
+diff --git a/scheduler.py b/scheduler.py
+new file mode 100644
+index 0000000..8965000
+--- /dev/null
++++ b/scheduler.py
+@@ -0,0 +1,130 @@
++"""
++scheduler.py
++Scheduler in-process (APScheduler) per i sync periodici.
++
++Railway esegue solo il Dockerfile (uvicorn), senza worker/beat Celery
++separati: i job schedulati in tasks.py non vengono mai eseguiti in
++produzione. Questo modulo copre i sync essenziali (partite live,
++prossimo turno, mercato, previsioni) direttamente nel processo API.
++"""
++import logging
++from datetime import datetime, timedelta
++
++from apscheduler.schedulers.background import BackgroundScheduler
++
++from config import settings
++
++logger = logging.getLogger(__name__)
++
++COMPETITIONS = ["SA", "CL", "PL"]
++
++
++def _sync_live_matches():
++    try:
++        from scraper.football_data_client import football_data
++        updated = football_data.sync_live_matches()
++        if updated:
++            logger.info(f"[scheduler] Live update: {len(updated)} partite")
++    except Exception as e:
++        logger.error(f"[scheduler] sync_live_matches error: {e}")
++
++
++def _bootstrap_if_empty():
++    """Se il DB non ha ancora partite, importa lo storico (una tantum)."""
++    if not settings.FOOTBALL_DATA_API_KEY:
++        return
++    try:
++        from db.database import get_db_session
++        from db.models import Match
++        from scraper.football_data_client import football_data
++
++        with get_db_session() as db:
++            has_matches = db.query(Match.id).first() is not None
++        if has_matches:
++            return
++
++        logger.info("[scheduler] DB vuoto: avvio import storico iniziale (3 stagioni)")
++        for comp in COMPETITIONS:
++            football_data.import_historical_matches(comp, seasons_back=3)
++    except Exception as e:
++        logger.error(f"[scheduler] bootstrap import error: {e}")
++
++
++def _sync_upcoming_matches():
++    if not settings.FOOTBALL_DATA_API_KEY:
++        return
++    try:
++        from scraper.football_data_client import football_data
++        for comp in COMPETITIONS:
++            football_data.import_upcoming_matches(comp, days_ahead=120)
++    except Exception as e:
++        logger.error(f"[scheduler] sync_upcoming_matches error: {e}")
++
++
++def _scrape_transfers():
++    if not settings.API_FOOTBALL_KEY:
++        return
++    try:
++        from scraper.transfer_scraper import TransferScraper
++        count = TransferScraper().scrape_all_sources()
++        logger.info(f"[scheduler] Trasferimenti importati: {count}")
++    except Exception as e:
++        logger.error(f"[scheduler] scrape_transfers error: {e}")
++
++
++def _update_predictions():
++    try:
++        from ml.predictor import predictor
++        from db.database import get_db_session
++        from db.models import Match
++
++        now = datetime.utcnow()
++        in_week = now + timedelta(days=7)
++        with get_db_session() as db:
++            match_ids = [
++                m.id for m in db.query(Match).filter(
++                    Match.kickoff >= now,
++                    Match.kickoff <= in_week,
++                    Match.status.in_(["scheduled", "timed"]),
++                ).all()
++            ]
++        for mid in match_ids:
++            try:
++                predictor.predict_match(mid)
++            except Exception as e:
++                logger.warning(f"[scheduler] previsione match {mid} fallita: {e}")
++        logger.info(f"[scheduler] Previsioni aggiornate: {len(match_ids)}")
++    except Exception as e:
++        logger.error(f"[scheduler] update_predictions error: {e}")
++
++
++_scheduler: BackgroundScheduler | None = None
++
++
++def start_scheduler() -> BackgroundScheduler:
++    global _scheduler
++    if _scheduler is not None:
++        return _scheduler
++
++    sched = BackgroundScheduler(timezone="UTC")
++    sched.add_job(_bootstrap_if_empty, "date",
++                   run_date=datetime.utcnow() + timedelta(seconds=10), id="bootstrap_if_empty")
++    sched.add_job(_sync_live_matches, "interval", minutes=2, id="sync_live_matches",
++                   next_run_time=datetime.utcnow() + timedelta(seconds=30))
++    sched.add_job(_sync_upcoming_matches, "interval", hours=6, id="sync_upcoming_matches",
++                   next_run_time=datetime.utcnow() + timedelta(seconds=60))
++    sched.add_job(_scrape_transfers, "interval", hours=3, id="scrape_transfers",
++                   next_run_time=datetime.utcnow() + timedelta(minutes=2))
++    sched.add_job(_update_predictions, "interval", hours=6, id="update_predictions",
++                   next_run_time=datetime.utcnow() + timedelta(minutes=3))
++    sched.start()
++    _scheduler = sched
++    logger.info("Scheduler in-process avviato")
++    return sched
++
++
++def stop_scheduler():
++    global _scheduler
++    if _scheduler is not None:
++        _scheduler.shutdown(wait=False)
++        _scheduler = None
+diff --git a/scraper/football_data_client.py b/scraper/football_data_client.py
+index f070c15..0dcfc0e 100644
+--- a/scraper/football_data_client.py
++++ b/scraper/football_data_client.py
+@@ -171,6 +171,65 @@ class FootballDataClient:
+         logger.info(f"Importate {len(imported)} squadre per {competition_code}")
+         return imported
+ 
++    def _save_matches(self, matches: list[dict], comp_id: int) -> int:
++        """
++        Salva (o aggiorna) una lista di partite restituite da football-data.org.
++        Restituisce il numero di nuove partite inserite.
++        """
++        count = 0
++        for m in matches:
++            ext_id = str(m["id"])
++            try:
++                with get_db_session() as db:
++                    existing = db.query(Match).filter_by(ext_id=ext_id).first()
++
++                    home = db.query(Team).filter_by(
++                        ext_id=str(m["homeTeam"]["id"])
++                    ).first()
++                    away = db.query(Team).filter_by(
++                        ext_id=str(m["awayTeam"]["id"])
++                    ).first()
++
++                    if not home or not away:
++                        continue
++
++                    score = m.get("score", {})
++                    full  = score.get("fullTime", {})
++                    ht    = score.get("halfTime", {})
++
++                    if existing:
++                        # Aggiorna stato/risultato/data (es. rinvii, orari confermati)
++                        existing.status     = m.get("status", existing.status).lower()
++                        existing.kickoff    = self._parse_date(m.get("utcDate")) or existing.kickoff
++                        existing.matchday   = m.get("matchday", existing.matchday)
++                        existing.home_score = full.get("home", existing.home_score)
++                        existing.away_score = full.get("away", existing.away_score)
++                        existing.home_ht    = ht.get("home", existing.home_ht)
++                        existing.away_ht    = ht.get("away", existing.away_ht)
++                        continue
++
++                    match = Match(
++                        ext_id=ext_id,
++                        competition_id=comp_id,
++                        home_team_id=home.id,
++                        away_team_id=away.id,
++                        matchday=m.get("matchday"),
++                        kickoff=self._parse_date(m.get("utcDate")),
++                        status=m.get("status", "FINISHED").lower(),
++                        home_score=full.get("home"),
++                        away_score=full.get("away"),
++                        home_ht=ht.get("home"),
++                        away_ht=ht.get("away"),
++                    )
++                    db.add(match)
++                    count += 1
++            except Exception as e:
++                if "duplicate" in str(e).lower() or "unique" in str(e).lower():
++                    continue  # partita già inserita da altro thread
++                logger.warning(f"Skip match {ext_id}: {e}")
++
++        return count
++
+     def import_historical_matches(
+         self,
+         competition_code: str,
+@@ -201,50 +260,38 @@ class FootballDataClient:
+                 logger.warning(f"Errore fetch stagione {year_from}: {e}")
+                 continue
+ 
+-            for m in matches:
+-                ext_id = str(m["id"])
+-                try:
+-                    with get_db_session() as db:
+-                        if db.query(Match).filter_by(ext_id=ext_id).first():
+-                            continue  # già presente
+-
+-                        home = db.query(Team).filter_by(
+-                            ext_id=str(m["homeTeam"]["id"])
+-                        ).first()
+-                        away = db.query(Team).filter_by(
+-                            ext_id=str(m["awayTeam"]["id"])
+-                        ).first()
+-
+-                        if not home or not away:
+-                            continue
+-
+-                        score = m.get("score", {})
+-                        full  = score.get("fullTime", {})
+-                        ht    = score.get("halfTime", {})
+-
+-                        match = Match(
+-                            ext_id=ext_id,
+-                            competition_id=comp_id,
+-                            home_team_id=home.id,
+-                            away_team_id=away.id,
+-                            matchday=m.get("matchday"),
+-                            kickoff=self._parse_date(m.get("utcDate")),
+-                            status=m.get("status", "FINISHED").lower(),
+-                            home_score=full.get("home"),
+-                            away_score=full.get("away"),
+-                            home_ht=ht.get("home"),
+-                            away_ht=ht.get("away"),
+-                        )
+-                        db.add(match)
+-                        count += 1
+-                except Exception as e:
+-                    if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+-                        continue  # partita già inserita da altro thread
+-                    logger.warning(f"Skip match {ext_id}: {e}")
++            count += self._save_matches(matches, comp_id)
+ 
+         logger.info(f"Importate {count} partite storiche per {competition_code}")
+         return count
+ 
++    def import_upcoming_matches(
++        self,
++        competition_code: str,
++        days_ahead: int = 120,
++    ) -> int:
++        """
++        Importa (o aggiorna) le partite programmate nei prossimi `days_ahead`
++        giorni, indipendentemente dai confini di stagione (utile per avere
++        sempre il prossimo turno anche a stagione conclusa/non ancora iniziata).
++        """
++        comp_id = self.import_competition(competition_code)
++        self.import_teams(competition_code)
++
++        now = datetime.utcnow()
++        date_from = now.strftime("%Y-%m-%d")
++        date_to = (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
++
++        try:
++            matches = self.get_matches(competition_code, date_from, date_to)
++        except Exception as e:
++            logger.warning(f"Errore fetch prossime partite {competition_code}: {e}")
++            return 0
++
++        count = self._save_matches(matches, comp_id)
++        logger.info(f"Importate/aggiornate {count} prossime partite per {competition_code}")
++        return count
++
+     def sync_live_matches(self) -> list[dict]:
+         """
+         Aggiorna le partite in corso o di oggi.
+diff --git a/scraper/transfer_scraper.py b/scraper/transfer_scraper.py
+index 2837e54..51e59f1 100644
+--- a/scraper/transfer_scraper.py
++++ b/scraper/transfer_scraper.py
+@@ -170,3 +170,6 @@ class TransferScraper:
+                 saved = True
+ 
+         return saved
++
++
++transfer_scraper = TransferScraper()
+-- 
+2.43.0
+
+
+From ce39fee5e4cfa070ed67f58f204359e5cd3b6a2e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 11 Jun 2026 08:15:05 +0000
+Subject: [PATCH 2/2] Aggiungi .gitignore
+
+---
+ .gitignore | 4 ++++
+ 1 file changed, 4 insertions(+)
+ create mode 100644 .gitignore
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..86a72fe
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,4 @@
++__pycache__/
++*.pyc
++.env
++celerybeat-schedule
+-- 
+2.43.0
+

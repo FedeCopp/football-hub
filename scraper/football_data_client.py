@@ -171,6 +171,65 @@ class FootballDataClient:
         logger.info(f"Importate {len(imported)} squadre per {competition_code}")
         return imported
 
+    def _save_matches(self, matches: list[dict], comp_id: int) -> int:
+        """
+        Salva (o aggiorna) una lista di partite restituite da football-data.org.
+        Restituisce il numero di nuove partite inserite.
+        """
+        count = 0
+        for m in matches:
+            ext_id = str(m["id"])
+            try:
+                with get_db_session() as db:
+                    existing = db.query(Match).filter_by(ext_id=ext_id).first()
+
+                    home = db.query(Team).filter_by(
+                        ext_id=str(m["homeTeam"]["id"])
+                    ).first()
+                    away = db.query(Team).filter_by(
+                        ext_id=str(m["awayTeam"]["id"])
+                    ).first()
+
+                    if not home or not away:
+                        continue
+
+                    score = m.get("score", {})
+                    full  = score.get("fullTime", {})
+                    ht    = score.get("halfTime", {})
+
+                    if existing:
+                        # Aggiorna stato/risultato/data (es. rinvii, orari confermati)
+                        existing.status     = m.get("status", existing.status).lower()
+                        existing.kickoff    = self._parse_date(m.get("utcDate")) or existing.kickoff
+                        existing.matchday   = m.get("matchday", existing.matchday)
+                        existing.home_score = full.get("home", existing.home_score)
+                        existing.away_score = full.get("away", existing.away_score)
+                        existing.home_ht    = ht.get("home", existing.home_ht)
+                        existing.away_ht    = ht.get("away", existing.away_ht)
+                        continue
+
+                    match = Match(
+                        ext_id=ext_id,
+                        competition_id=comp_id,
+                        home_team_id=home.id,
+                        away_team_id=away.id,
+                        matchday=m.get("matchday"),
+                        kickoff=self._parse_date(m.get("utcDate")),
+                        status=m.get("status", "FINISHED").lower(),
+                        home_score=full.get("home"),
+                        away_score=full.get("away"),
+                        home_ht=ht.get("home"),
+                        away_ht=ht.get("away"),
+                    )
+                    db.add(match)
+                    count += 1
+            except Exception as e:
+                if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+                    continue  # partita già inserita da altro thread
+                logger.warning(f"Skip match {ext_id}: {e}")
+
+        return count
+
     def import_historical_matches(
         self,
         competition_code: str,
@@ -201,48 +260,36 @@ class FootballDataClient:
                 logger.warning(f"Errore fetch stagione {year_from}: {e}")
                 continue
 
-            for m in matches:
-                ext_id = str(m["id"])
-                try:
-                    with get_db_session() as db:
-                        if db.query(Match).filter_by(ext_id=ext_id).first():
-                            continue  # già presente
-
-                        home = db.query(Team).filter_by(
-                            ext_id=str(m["homeTeam"]["id"])
-                        ).first()
-                        away = db.query(Team).filter_by(
-                            ext_id=str(m["awayTeam"]["id"])
-                        ).first()
-
-                        if not home or not away:
-                            continue
-
-                        score = m.get("score", {})
-                        full  = score.get("fullTime", {})
-                        ht    = score.get("halfTime", {})
-
-                        match = Match(
-                            ext_id=ext_id,
-                            competition_id=comp_id,
-                            home_team_id=home.id,
-                            away_team_id=away.id,
-                            matchday=m.get("matchday"),
-                            kickoff=self._parse_date(m.get("utcDate")),
-                            status=m.get("status", "FINISHED").lower(),
-                            home_score=full.get("home"),
-                            away_score=full.get("away"),
-                            home_ht=ht.get("home"),
-                            away_ht=ht.get("away"),
-                        )
-                        db.add(match)
-                        count += 1
-                except Exception as e:
-                    if "duplicate" in str(e).lower() or "unique" in str(e).lower():
-                        continue  # partita già inserita da altro thread
-                    logger.warning(f"Skip match {ext_id}: {e}")
+            count += self._save_matches(matches, comp_id)
 
         logger.info(f"Importate {count} partite storiche per {competition_code}")
+        return count
+
+    def import_upcoming_matches(
+        self,
+        competition_code: str,
+        days_ahead: int = 120,
+    ) -> int:
+        """
+        Importa (o aggiorna) le partite programmate nei prossimi `days_ahead`
+        giorni, indipendentemente dai confini di stagione (utile per avere
+        sempre il prossimo turno anche a stagione conclusa/non ancora iniziata).
+        """
+        comp_id = self.import_competition(competition_code)
+        self.import_teams(competition_code)
+
+        now = datetime.utcnow()
+        date_from = now.strftime("%Y-%m-%d")
+        date_to = (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+
+        try:
+            matches = self.get_matches(competition_code, date_from, date_to)
+        except Exception as e:
+            logger.warning(f"Errore fetch prossime partite {competition_code}: {e}")
+            return 0
+
+        count = self._save_matches(matches, comp_id)
+        logger.info(f"Importate/aggiornate {count} prossime partite per {competition_code}")
         return count
 
     def sync_live_matches(self) -> list[dict]:

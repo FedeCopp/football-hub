@@ -1,0 +1,584 @@
+From 558153086e68d190063fde6a7f189c06c1d4a1bc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 10 Jun 2026 10:26:48 +0000
+Subject: [PATCH] Rimuovi dipendenza dalle quote bookmaker, fix bug frontend e
+ chat
+
+- ml/predictor.py: le previsioni 1X2/marcatori/ammoniti si basano solo
+  su storico (h2h, forma, classifica, infortuni), niente piu' blend con
+  quote. Aggiunto fallback su rosa squadra per marcatori/ammoniti quando
+  le formazioni non sono ancora disponibili.
+- main.py: rimosso il blocco "odds" non piu' usato da _serialize_match
+- frontend/football_hub.html, docs/index.html: card partite e modale
+  previsione non mostrano piu' le quote; aggiunti stati "Previsione non
+  ancora disponibile" / "Dati storici giocatori non disponibili" al
+  posto di valori fittizi 33/33/33
+- frontend/football_hub.html: fix errore di sintassi JS in renderMatches
+  (codice morto dopo return precoce) che rompeva tutta la pagina
+- fix messaggio di benvenuto chat (\n\n -> <br><br>)
+- chatbot/agent.py: aggiunto metodo stream_response mancante usato
+  dall'endpoint SSE /api/chat/stream
+- aggiunto .env.example per il quick-start del README
+
+https://claude.ai/code/session_01AXmPEhmNiDNYzX7STvYGW8
+---
+ .env.example               |  39 +++++++++++
+ chatbot/agent.py           |  12 ++++
+ docs/index.html            |  40 ++++++------
+ frontend/football_hub.html |  51 +++++++--------
+ main.py                    |  15 +----
+ ml/predictor.py            | 128 ++++++++++++++++++-------------------
+ 6 files changed, 161 insertions(+), 124 deletions(-)
+ create mode 100644 .env.example
+
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..ac674f4
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,39 @@
++# ─────────────────────────────────────────────────────────────
++# .env.example — copia in .env e inserisci le tue chiavi
++#   cp .env.example .env
++# ─────────────────────────────────────────────────────────────
++
++# ── Database ──────────────────────────────────────────────────
++# Locale (docker-compose): postgresql://footballhub:footballhub@postgres:5432/footballhub
++# Cloud (Neon, ecc.):      postgresql://user:password@host/dbname
++DATABASE_URL=postgresql://user:password@localhost:5432/footballhub
++REDIS_URL=redis://localhost:6379/0
++
++# ── API Calcio ────────────────────────────────────────────────
++# football-data.org — gratis, chiave immediata
++FOOTBALL_DATA_API_KEY=
++# rapidapi.com → "API-Football", piano free 100 req/giorno
++API_FOOTBALL_KEY=
++# the-odds-api.com — gratis, 500 req/mese
++ODDS_API_KEY=
++
++# ── Chatbot LLM ───────────────────────────────────────────────
++# Priorità: Groq > OpenAI > Ollama locale
++GROQ_API_KEY=
++GROQ_MODEL=llama-3.1-70b-versatile
++
++OPENAI_API_KEY=
++
++OLLAMA_BASE_URL=http://localhost:11434
++OLLAMA_MODEL=llama3.2
++
++# ── Scraping ──────────────────────────────────────────────────
++SCRAPER_DELAY=2.0
++PROXY_URL=
++
++# ── App ───────────────────────────────────────────────────────
++APP_HOST=0.0.0.0
++APP_PORT=8000
++DEBUG=False
++# Cambia questo valore in produzione: protegge gli endpoint /api/admin/*
++SECRET_KEY=change-this-in-production
+diff --git a/chatbot/agent.py b/chatbot/agent.py
+index b25d06e..273b9e8 100644
+--- a/chatbot/agent.py
++++ b/chatbot/agent.py
+@@ -390,6 +390,18 @@ class FootballChatbot:
+         logger.error(f"Chat fallita [{self.session_id}]: {last_error}")
+         return "Mi dispiace, servizio temporaneamente non disponibile. Riprova tra qualche secondo."
+ 
++    async def stream_response(self, message: str):
++        """
++        Versione streaming per l'endpoint SSE: genera prima la risposta
++        completa (con retry/cleaning di chat_async) e la restituisce
++        a piccoli blocchi, per un effetto "a comparsa" lato client.
++        """
++        import asyncio
++        response = await self.chat_async(message)
++        for i in range(0, len(response), 4):
++            yield response[i:i + 4]
++            await asyncio.sleep(0.02)
++
+     def clear_history(self):
+         self.chat_history = []
+ 
+diff --git a/docs/index.html b/docs/index.html
+index d516f54..c1f7ba0 100644
+--- a/docs/index.html
++++ b/docs/index.html
+@@ -213,7 +213,7 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;font
+     <div class="chat-messages" id="chat-messages">
+       <div class="msg bot">
+         <div class="msg-meta">FootballHub AI</div>
+-        <div class="msg-bubble">Ciao! Sono il tuo assistente calcistico. Interrogo il database in tempo reale per formazioni, previsioni e rumors di mercato.\n\nCosa vuoi sapere?</div>
++        <div class="msg-bubble">Ciao! Sono il tuo assistente calcistico. Interrogo il database in tempo reale per formazioni, previsioni e rumors di mercato.<br><br>Cosa vuoi sapere?</div>
+       </div>
+     </div>
+     <div class="quick-btns">
+@@ -418,10 +418,26 @@ function renderMatches() {
+     const isFinished = m.status === 'finished';
+     const formH = (m.form?.home || []).map(f => `<div class="form-dot form-${f.toLowerCase()}">${f}</div>`).join('');
+     const formA = (m.form?.away || []).map(f => `<div class="form-dot form-${f.toLowerCase()}">${f}</div>`).join('');
+-    const ph = m.odds?.impl_home || 33, pd = m.odds?.impl_draw || 33, pa = m.odds?.impl_away || 33;
++    // Probabilità calcolate dallo storico (vedi ml/predictor.py) — nessuna quota bookmaker
++    const pred = m.prediction || {};
++    const hasPred = pred.home != null && pred.draw != null && pred.away != null;
++    const ph = hasPred ? pred.home : 0, pd = hasPred ? pred.draw : 0, pa = hasPred ? pred.away : 0;
+     const centerContent = isFinished ? `<div class="vs-time">${m.score.home}-${m.score.away}</div><div style="font-size:10px;color:var(--muted)">FT</div>`
+       : isLive ? `<div class="vs-time" style="color:var(--red)">${m.score.home||0}-${m.score.away||0}</div><div style="font-size:10px;color:var(--red)">LIVE</div>`
+       : `<div class="vs-time">${kickoff}</div><div style="font-size:10px;color:var(--muted)">VS</div>`;
++    const predictionBlock = hasPred ? `
++        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:3px">
++          <span>1 · ${Math.round(ph)}%</span>
++          <span>X · ${Math.round(pd)}%</span>
++          <span>2 · ${Math.round(pa)}%</span>
++        </div>
++        <div class="odds-bar">
++          <div class="odds-seg odds-1" style="flex:${Math.round(ph)}">${Math.round(ph)}%</div>
++          <div class="odds-seg odds-x" style="flex:${Math.round(pd)}">${Math.round(pd)}%</div>
++          <div class="odds-seg odds-2" style="flex:${Math.round(pa)}">${Math.round(pa)}%</div>
++        </div>
++        <div class="info-label">Previsione basata su storico</div>` : `
++        <div class="info-label" style="padding:4px 0">Previsione non ancora disponibile</div>`;
+     return `<div class="match-card" onclick="openMatchPred(${m.id})">
+       <div class="match-header">
+         <span>${m.competition}</span>
+@@ -433,18 +449,7 @@ function renderMatches() {
+         <div class="vs-block">${centerContent}</div>
+         <div class="team-block" style="text-align:right"><div class="team-name">${m.away.short||m.away.name}</div><div class="team-form" style="justify-content:flex-end">${formA}</div></div>
+       </div>
+-      <div style="padding:0 20px 12px">
+-        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:3px">
+-          <span>1 · ${Math.round(ph)}%${m.odds?.home_win?' ('+m.odds.home_win.toFixed(2)+')':''}</span>
+-          <span>X · ${Math.round(pd)}%</span>
+-          <span>2 · ${Math.round(pa)}%${m.odds?.away_win?' ('+m.odds.away_win.toFixed(2)+')':''}</span>
+-        </div>
+-        <div class="odds-bar">
+-          <div class="odds-seg odds-1" style="flex:${Math.round(ph)}">${Math.round(ph)}%</div>
+-          <div class="odds-seg odds-x" style="flex:${Math.round(pd)}">${Math.round(pd)}%</div>
+-          <div class="odds-seg odds-2" style="flex:${Math.round(pa)}">${Math.round(pa)}%</div>
+-        </div>
+-        <div class="info-label">Prob. ML + quote bookmaker come feature calibrativa</div>
++      <div style="padding:0 20px 12px">${predictionBlock}
+       </div>
+     </div>`;
+   }).join('');
+@@ -647,11 +652,10 @@ function renderPrediction(pred, match) {
+       <div class="card">
+         <div class="card-title">Esito previsto</div>
+         <div style="display:flex;gap:7px">
+-          ${[{l:'1',v:pred.outcome.home,q:match.odds?.home_win},{l:'X',v:pred.outcome.draw,q:match.odds?.draw},{l:'2',v:pred.outcome.away,q:match.odds?.away_win}].map(o=>`
++          ${[{l:'1',v:pred.outcome.home},{l:'X',v:pred.outcome.draw},{l:'2',v:pred.outcome.away}].map(o=>`
+             <div style="flex:1;text-align:center;padding:10px 6px;border-radius:8px;background:${o.v===maxProb?'rgba(0,230,118,.1)':'var(--bg3)'};border:1px solid ${o.v===maxProb?'rgba(0,230,118,.3)':'var(--border)'}">
+               <div style="font-family:'Barlow Condensed',sans-serif;font-size:26px;font-weight:800;color:${o.v===maxProb?'var(--acc)':'var(--text)'}">${o.l}</div>
+               <div style="font-size:17px;font-weight:700;color:${o.v===maxProb?'var(--acc)':'var(--muted)'}">${Math.round(o.v)}%</div>
+-              ${o.q?`<div style="font-size:10px;color:var(--dim)">${o.q.toFixed(2)}</div>`:''}
+             </div>`).join('')}
+         </div>
+         <div class="odds-bar" style="margin-top:10px">
+@@ -671,13 +675,13 @@ function renderPrediction(pred, match) {
+       </div>
+       <div class="card">
+         <div class="card-title">⚽ Marcatori probabili</div>
+-        ${scorers.map((s,i)=>`<div class="stat-row"><span class="stat-label"><span style="color:var(--dim);font-family:'Barlow Condensed',sans-serif;font-size:18px;margin-right:8px">${i+1}</span>${s.name}</span><span class="stat-val" style="color:var(--green)">${Math.round(s.prob)}%</span></div>`).join('')}
++        ${scorers.length ? scorers.map((s,i)=>`<div class="stat-row"><span class="stat-label"><span style="color:var(--dim);font-family:'Barlow Condensed',sans-serif;font-size:18px;margin-right:8px">${i+1}</span>${s.name}</span><span class="stat-val" style="color:var(--green)">${Math.round(s.prob)}%</span></div>`).join('') : `<div style="color:var(--muted);font-size:13px">Dati storici giocatori non disponibili.</div>`}
+       </div>
+     </div>
+     <div class="card">
+       <div class="card-title">🟨 Ammoniti più probabili</div>
+       <div style="display:flex;gap:10px;flex-wrap:wrap">
+-        ${booked.map(b=>`<div style="display:flex;align-items:center;gap:8px;background:var(--bg3);border-radius:6px;padding:8px 12px"><div style="width:11px;height:15px;background:var(--amber);border-radius:2px;flex-shrink:0"></div><div><div style="font-size:13px;font-weight:500">${b.name}</div></div><div style="font-size:13px;font-weight:700;color:var(--amber);margin-left:auto;padding-left:12px">${Math.round(b.prob)}%</div></div>`).join('')}
++        ${booked.length ? booked.map(b=>`<div style="display:flex;align-items:center;gap:8px;background:var(--bg3);border-radius:6px;padding:8px 12px"><div style="width:11px;height:15px;background:var(--amber);border-radius:2px;flex-shrink:0"></div><div><div style="font-size:13px;font-weight:500">${b.name}</div></div><div style="font-size:13px;font-weight:700;color:var(--amber);margin-left:auto;padding-left:12px">${Math.round(b.prob)}%</div></div>`).join('') : `<div style="color:var(--muted);font-size:13px">Dati storici giocatori non disponibili.</div>`}
+       </div>
+     </div>`;
+ }
+diff --git a/frontend/football_hub.html b/frontend/football_hub.html
+index fa5f065..b03e848 100644
+--- a/frontend/football_hub.html
++++ b/frontend/football_hub.html
+@@ -213,7 +213,7 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;font
+     <div class="chat-messages" id="chat-messages">
+       <div class="msg bot">
+         <div class="msg-meta">FootballHub AI</div>
+-        <div class="msg-bubble">Ciao! Sono il tuo assistente calcistico. Interrogo il database in tempo reale per formazioni, previsioni e rumors di mercato.\n\nCosa vuoi sapere?</div>
++        <div class="msg-bubble">Ciao! Sono il tuo assistente calcistico. Interrogo il database in tempo reale per formazioni, previsioni e rumors di mercato.<br><br>Cosa vuoi sapere?</div>
+       </div>
+     </div>
+     <div class="quick-btns">
+@@ -462,9 +462,7 @@ function renderMatches() {
+   });
+ 
+   document.getElementById('matches-container').innerHTML = html;
+-  return; // early return — skip il vecchio rendering
+-
+-  document.getElementById('matches-container').innerHTML = list.map(m => renderMatchCard(m)).join(''); }
++}
+ 
+ function renderMatchCard(m) {
+   const kickoff = m.kickoff ? new Date(m.kickoff).toLocaleTimeString('it', {hour:'2-digit',minute:'2-digit'}) : '—';
+@@ -473,11 +471,12 @@ function renderMatchCard(m) {
+   const formH = (m.form?.home || []).map(f => `<div class="form-dot form-${f.toLowerCase()}">${f}</div>`).join('');
+   const formA = (m.form?.away || []).map(f => `<div class="form-dot form-${f.toLowerCase()}">${f}</div>`).join('');
+ 
+-  // Usa probabilità ML dal campo prediction, fallback su quote bookmaker
++  // Probabilità calcolate dallo storico (vedi ml/predictor.py) — nessuna quota bookmaker
+   const pred = m.prediction || {};
+-  const ph = pred.home ?? m.odds?.impl_home ?? 33;
+-  const pd = pred.draw ?? m.odds?.impl_draw ?? 33;
+-  const pa = pred.away ?? m.odds?.impl_away ?? 33;
++  const hasPred = pred.home != null && pred.draw != null && pred.away != null;
++  const ph = hasPred ? pred.home : 0;
++  const pd = hasPred ? pred.draw : 0;
++  const pa = hasPred ? pred.away : 0;
+ 
+   const centerContent = isFinished
+     ? `<div class="vs-time">${m.score.home}-${m.score.away}</div><div style="font-size:10px;color:var(--muted)">FT</div>`
+@@ -485,8 +484,19 @@ function renderMatchCard(m) {
+     ? `<div class="vs-time" style="color:var(--red)">${m.score.home||0}-${m.score.away||0}</div><div style="font-size:10px;color:var(--red)">LIVE</div>`
+     : `<div class="vs-time">${kickoff}</div><div style="font-size:10px;color:var(--muted)">VS</div>`;
+ 
+-  const label1 = m.odds?.home_win ? `1 · ${Math.round(ph)}% (${m.odds.home_win.toFixed(2)})` : `1 · ${Math.round(ph)}%`;
+-  const label2 = m.odds?.away_win ? `2 · ${Math.round(pa)}% (${m.odds.away_win.toFixed(2)})` : `2 · ${Math.round(pa)}%`;
++  const predictionBlock = hasPred ? `
++      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:3px">
++        <span>1 · ${Math.round(ph)}%</span>
++        <span>X · ${Math.round(pd)}%</span>
++        <span>2 · ${Math.round(pa)}%</span>
++      </div>
++      <div class="odds-bar">
++        <div class="odds-seg odds-1" style="flex:${Math.round(ph)}">${Math.round(ph)}%</div>
++        <div class="odds-seg odds-x" style="flex:${Math.round(pd)}">${Math.round(pd)}%</div>
++        <div class="odds-seg odds-2" style="flex:${Math.round(pa)}">${Math.round(pa)}%</div>
++      </div>
++      <div class="info-label">Previsione basata su storico</div>` : `
++      <div class="info-label" style="padding:4px 0">Previsione non ancora disponibile</div>`;
+ 
+   return `<div class="match-card" onclick="openMatchPred(${m.id})">
+     <div class="match-header">
+@@ -499,22 +509,10 @@ function renderMatchCard(m) {
+       <div class="vs-block">${centerContent}</div>
+       <div class="team-block" style="text-align:right"><div class="team-name">${m.away.short||m.away.name}</div><div class="team-form" style="justify-content:flex-end">${formA}</div></div>
+     </div>
+-    <div style="padding:0 20px 12px">
+-      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:3px">
+-        <span>${label1}</span>
+-        <span>X · ${Math.round(pd)}%</span>
+-        <span>${label2}</span>
+-      </div>
+-      <div class="odds-bar">
+-        <div class="odds-seg odds-1" style="flex:${Math.round(ph)}">${Math.round(ph)}%</div>
+-        <div class="odds-seg odds-x" style="flex:${Math.round(pd)}">${Math.round(pd)}%</div>
+-        <div class="odds-seg odds-2" style="flex:${Math.round(pa)}">${Math.round(pa)}%</div>
+-      </div>
+-      <div class="info-label">${pred.home ? 'Previsione ML' : 'Quote bookmaker'}</div>
++    <div style="padding:0 20px 12px">${predictionBlock}
+     </div>
+   </div>`;
+ }
+-}
+ 
+ function setMatchFilter(btn, f) {
+   document.querySelectorAll('#page-matches .filter-btn').forEach(b => b.classList.remove('active'));
+@@ -713,11 +711,10 @@ function renderPrediction(pred, match) {
+       <div class="card">
+         <div class="card-title">Esito previsto</div>
+         <div style="display:flex;gap:7px">
+-          ${[{l:'1',v:pred.outcome.home,q:match.odds?.home_win},{l:'X',v:pred.outcome.draw,q:match.odds?.draw},{l:'2',v:pred.outcome.away,q:match.odds?.away_win}].map(o=>`
++          ${[{l:'1',v:pred.outcome.home},{l:'X',v:pred.outcome.draw},{l:'2',v:pred.outcome.away}].map(o=>`
+             <div style="flex:1;text-align:center;padding:10px 6px;border-radius:8px;background:${o.v===maxProb?'rgba(0,230,118,.1)':'var(--bg3)'};border:1px solid ${o.v===maxProb?'rgba(0,230,118,.3)':'var(--border)'}">
+               <div style="font-family:'Barlow Condensed',sans-serif;font-size:26px;font-weight:800;color:${o.v===maxProb?'var(--acc)':'var(--text)'}">${o.l}</div>
+               <div style="font-size:17px;font-weight:700;color:${o.v===maxProb?'var(--acc)':'var(--muted)'}">${Math.round(o.v)}%</div>
+-              ${o.q?`<div style="font-size:10px;color:var(--dim)">${o.q.toFixed(2)}</div>`:''}
+             </div>`).join('')}
+         </div>
+         <div class="odds-bar" style="margin-top:10px">
+@@ -737,13 +734,13 @@ function renderPrediction(pred, match) {
+       </div>
+       <div class="card">
+         <div class="card-title">⚽ Marcatori probabili</div>
+-        ${scorers.map((s,i)=>`<div class="stat-row"><span class="stat-label"><span style="color:var(--dim);font-family:'Barlow Condensed',sans-serif;font-size:18px;margin-right:8px">${i+1}</span>${s.name}</span><span class="stat-val" style="color:var(--green)">${Math.round(s.prob)}%</span></div>`).join('')}
++        ${scorers.length ? scorers.map((s,i)=>`<div class="stat-row"><span class="stat-label"><span style="color:var(--dim);font-family:'Barlow Condensed',sans-serif;font-size:18px;margin-right:8px">${i+1}</span>${s.name}</span><span class="stat-val" style="color:var(--green)">${Math.round(s.prob)}%</span></div>`).join('') : `<div style="color:var(--muted);font-size:13px">Dati storici giocatori non disponibili.</div>`}
+       </div>
+     </div>
+     <div class="card">
+       <div class="card-title">🟨 Ammoniti più probabili</div>
+       <div style="display:flex;gap:10px;flex-wrap:wrap">
+-        ${booked.map(b=>`<div style="display:flex;align-items:center;gap:8px;background:var(--bg3);border-radius:6px;padding:8px 12px"><div style="width:11px;height:15px;background:var(--amber);border-radius:2px;flex-shrink:0"></div><div><div style="font-size:13px;font-weight:500">${b.name}</div></div><div style="font-size:13px;font-weight:700;color:var(--amber);margin-left:auto;padding-left:12px">${Math.round(b.prob)}%</div></div>`).join('')}
++        ${booked.length ? booked.map(b=>`<div style="display:flex;align-items:center;gap:8px;background:var(--bg3);border-radius:6px;padding:8px 12px"><div style="width:11px;height:15px;background:var(--amber);border-radius:2px;flex-shrink:0"></div><div><div style="font-size:13px;font-weight:500">${b.name}</div></div><div style="font-size:13px;font-weight:700;color:var(--amber);margin-left:auto;padding-left:12px">${Math.round(b.prob)}%</div></div>`).join('') : `<div style="color:var(--muted);font-size:13px">Dati storici giocatori non disponibili.</div>`}
+       </div>
+     </div>`;
+ }
+diff --git a/main.py b/main.py
+index ed0b42a..111887d 100644
+--- a/main.py
++++ b/main.py
+@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
+ 
+ from config import settings
+ from db.database import get_db, init_db, health_check
+-from db.models import Match, Team, Player, Lineup, LineupPlayer, Transfer, Prediction, Odds, Injury
++from db.models import Match, Team, Player, Lineup, LineupPlayer, Transfer, Prediction, Injury
+ from api.chat_router import chat_router
+ 
+ logging.basicConfig(level=logging.INFO)
+@@ -172,11 +172,6 @@ def _serialize_match(match: Match, db: Session, detailed: bool = False) -> dict:
+     home = match.home_team
+     away = match.away_team
+ 
+-    # Quote medie
+-    odds_row = db.query(Odds).filter_by(
+-        match_id=match.id, market="1x2", bookmaker="average"
+-    ).first()
+-
+     # Forma ultima 5 partite
+     def get_form(team_id: int) -> list[str]:
+         recent = db.query(Match).filter(
+@@ -224,14 +219,6 @@ def _serialize_match(match: Match, db: Session, detailed: bool = False) -> dict:
+             "home": get_form(home.id),
+             "away": get_form(away.id),
+         },
+-        "odds": {
+-            "home": odds_row.home_win if odds_row else None,
+-            "draw": odds_row.draw if odds_row else None,
+-            "away": odds_row.away_win if odds_row else None,
+-            "impl_home": odds_row.impl_home if odds_row else None,
+-            "impl_draw": odds_row.impl_draw if odds_row else None,
+-            "impl_away": odds_row.impl_away if odds_row else None,
+-        },
+         "prediction": {
+             "home": round(float(pred_row.prob_home), 1) if pred_row and pred_row.prob_home and pred_row.prob_home != 33.3 else None,
+             "draw": round(float(pred_row.prob_draw), 1) if pred_row and pred_row.prob_draw and pred_row.prob_draw != 33.3 else None,
+diff --git a/ml/predictor.py b/ml/predictor.py
+index 22677fd..8472520 100644
+--- a/ml/predictor.py
++++ b/ml/predictor.py
+@@ -16,7 +16,7 @@ import numpy as np
+ import pandas as pd
+ 
+ from db.database import get_db_session
+-from db.models import Match, Team, Lineup, LineupPlayer, PlayerStats, Odds, Prediction, Injury, Competition
++from db.models import Match, Team, Lineup, LineupPlayer, PlayerStats, Player, Prediction, Injury, Competition
+ 
+ logger = logging.getLogger(__name__)
+ MODEL_DIR = Path(__file__).parent / "models"
+@@ -62,14 +62,16 @@ class FootballPredictor:
+ 
+     def _predict_with_rules(self, match_id, home_id, away_id, comp_id, kickoff) -> Optional[Prediction]:
+         """
+-        Calcola probabilità usando:
++        Calcola probabilità basandosi esclusivamente sullo storico:
+         1. Scontri diretti storici
+         2. Forma recente (ultimi 8 match)
+         3. Posizione in classifica
+         4. Rendimento casa/trasferta
+         5. Differenza reti
+-        6. Quote bookmaker (se disponibili)
+-        7. Infortuni chiave
++        6. Infortuni chiave
++
++        Nota: nessuna dipendenza da quote bookmaker — le probabilità
++        derivano solo dal confronto tra partite precedenti e statistiche.
+         """
+         with get_db_session() as db:
+             now = kickoff or datetime.utcnow()
+@@ -96,11 +98,6 @@ class FootballPredictor:
+             home_injuries = self._count_injuries(db, home_id)
+             away_injuries = self._count_injuries(db, away_id)
+ 
+-            # ── 6. Quote bookmaker ──────────────────────────
+-            odds = db.query(Odds).filter_by(
+-                match_id=match_id, market="1x2", bookmaker="average"
+-            ).first()
+-
+             # ── Calcolo score ───────────────────────────────
+             # Base: vantaggio casa (in media 45% vittorie home nel calcio)
+             home_score = 1.45
+@@ -147,12 +144,6 @@ class FootballPredictor:
+             prob_draw = (draw_score / total) * 100
+             prob_away = (away_score / total) * 100
+ 
+-            # Blend con quote bookmaker se disponibili (peso 35%)
+-            if odds and odds.impl_home and odds.impl_home != 33.3:
+-                prob_home = prob_home * 0.65 + odds.impl_home * 0.35
+-                prob_draw = prob_draw * 0.65 + odds.impl_draw * 0.35
+-                prob_away = prob_away * 0.65 + odds.impl_away * 0.35
+-
+             # Normalizza
+             total_prob = prob_home + prob_draw + prob_away
+             prob_home = round((prob_home / total_prob) * 100, 1)
+@@ -175,9 +166,10 @@ class FootballPredictor:
+             scorer_probs = self._predict_scorers(db, match_id, home_lambda, away_lambda)
+             booked_probs = self._predict_bookings(db, match_id)
+ 
+-            # Confidence: alta se abbiamo molti dati
++            # Confidence: alta se abbiamo molti dati storici
+             data_points = home_form["played"] + away_form["played"] + h2h["total"]
+-            confidence = min(0.95, 0.3 + data_points * 0.02 + (0.15 if odds else 0))
++            has_standings = home_standing["position"] > 0 and away_standing["position"] > 0
++            confidence = min(0.95, 0.3 + data_points * 0.02 + (0.1 if has_standings else 0))
+ 
+         # Salva
+         with get_db_session() as db:
+@@ -356,44 +348,67 @@ class FootballPredictor:
+     # MARCATORI E AMMONITI
+     # ─────────────────────────────────────────────────────────
+ 
++    def _get_squad_candidates(self, db, match_id, team_id) -> list:
++        """
++        Restituisce i giocatori da considerare per marcatori/ammoniti come
++        lista di tuple (player_id, name, position, ultime PlayerStats|None).
++
++        Usa la formazione (ufficiale o probabile) se già disponibile,
++        altrimenti ripiega sulla rosa ordinata per presenze nello storico,
++        cosi' le previsioni esistono anche prima che le formazioni vengano
++        scaricate.
++        """
++        lineup = db.query(Lineup).filter_by(
++            match_id=match_id, team_id=team_id
++        ).order_by(Lineup.is_official.desc()).first()
++
++        if lineup:
++            starters = db.query(LineupPlayer).filter_by(
++                lineup_id=lineup.id, role="starter"
++            ).all()
++            candidates = []
++            for lp in starters:
++                if not lp.player_id:
++                    continue
++                player = lp.player
++                pos = (lp.position or (player.position if player else "") or "").upper()
++                stats = db.query(PlayerStats).filter_by(
++                    player_id=lp.player_id
++                ).order_by(PlayerStats.season.desc()).first()
++                candidates.append((lp.player_id, player.name if player else "N/D", pos, stats))
++            if candidates:
++                return candidates
++
++        # Fallback: rosa della squadra ordinata per presenze nello storico
++        candidates = []
++        for player in db.query(Player).filter_by(team_id=team_id).all():
++            stats = db.query(PlayerStats).filter_by(
++                player_id=player.id
++            ).order_by(PlayerStats.season.desc()).first()
++            candidates.append((player.id, player.name, (player.position or "").upper(), stats))
++
++        candidates.sort(key=lambda c: (c[3].appearances or 0) if c[3] else 0, reverse=True)
++        return candidates[:11]
++
+     def _predict_scorers(self, db, match_id, home_lambda, away_lambda) -> list:
+         from scipy.stats import poisson
+-        from sqlalchemy import or_
+ 
+         result = []
+         match = db.query(Match).filter_by(id=match_id).first()
+         if not match:
+             return []
+ 
+-        for is_home, lam, team_id in [
+-            (True, home_lambda, match.home_team_id),
+-            (False, away_lambda, match.away_team_id)
++        for lam, team_id in [
++            (home_lambda, match.home_team_id),
++            (away_lambda, match.away_team_id)
+         ]:
+-            lineup = db.query(Lineup).filter_by(
+-                match_id=match_id, team_id=team_id
+-            ).order_by(Lineup.is_official.desc()).first()
+-
+-            if not lineup:
+-                continue
+-
+-            starters = db.query(LineupPlayer).filter_by(
+-                lineup_id=lineup.id, role="starter"
+-            ).all()
+-
+             p_team = float(1 - poisson.pmf(0, lam))
+ 
+-            for lp in starters:
+-                if not lp.player_id:
+-                    continue
+-                pos = (lp.position or "").upper()
++            for player_id, name, pos, stats in self._get_squad_candidates(db, match_id, team_id):
+                 if pos in ("GK", "G"):
+                     continue
+ 
+                 # Gol per partita dallo storico
+-                stats = db.query(PlayerStats).filter_by(
+-                    player_id=lp.player_id
+-                ).order_by(PlayerStats.season.desc()).first()
+-
+                 if stats and stats.appearances and stats.appearances > 0:
+                     gpm = (stats.goals or 0) / stats.appearances
+                     xg = (stats.xg or gpm) / max(stats.appearances, 1)
+@@ -407,10 +422,9 @@ class FootballPredictor:
+                 if p_score < 0.04:
+                     continue
+ 
+-                player = lp.player
+                 result.append({
+-                    "player_id": lp.player_id,
+-                    "name": player.name if player else "N/D",
++                    "player_id": player_id,
++                    "name": name,
+                     "team_id": team_id,
+                     "prob": round(p_score * 100, 1),
+                 })
+@@ -425,33 +439,19 @@ class FootballPredictor:
+             return []
+ 
+         for team_id in [match.home_team_id, match.away_team_id]:
+-            lineup = db.query(Lineup).filter_by(
+-                match_id=match_id, team_id=team_id
+-            ).order_by(Lineup.is_official.desc()).first()
+-            if not lineup:
+-                continue
+-
+-            for lp in db.query(LineupPlayer).filter_by(lineup_id=lineup.id, role="starter").all():
+-                if not lp.player_id:
+-                    continue
+-                stats = db.query(PlayerStats).filter_by(
+-                    player_id=lp.player_id
+-                ).order_by(PlayerStats.season.desc()).first()
+-
++            for player_id, name, pos, stats in self._get_squad_candidates(db, match_id, team_id):
+                 if stats and stats.appearances and stats.appearances > 0:
+                     ypm = (stats.yellow_cards or 0) / stats.appearances
+                 else:
+-                    pos = (lp.position or "").upper()
+                     defaults = {"DM": 0.22, "CM": 0.18, "CB": 0.16, "LB": 0.14, "RB": 0.14}
+                     ypm = defaults.get(pos[:2], 0.12)
+ 
+                 if ypm < 0.05:
+                     continue
+ 
+-                player = lp.player
+                 result.append({
+-                    "player_id": lp.player_id,
+-                    "name": player.name if player else "N/D",
++                    "player_id": player_id,
++                    "name": name,
+                     "team_id": team_id,
+                     "prob": round(min(ypm * 100, 60), 1),
+                 })
+@@ -482,8 +482,6 @@ class FootballPredictor:
+             hi = self._count_injuries(db, home_id)
+             ai = self._count_injuries(db, away_id)
+ 
+-            odds = db.query(Odds).filter_by(match_id=match_id, market="1x2", bookmaker="average").first()
+-
+             f = {
+                 "home_ppm": hf["ppm"], "away_ppm": af["ppm"],
+                 "home_gf": hf["gf_per_match"], "away_gf": af["gf_per_match"],
+@@ -495,10 +493,10 @@ class FootballPredictor:
+                 "h2h_draw_rate": h2h["draws"] / max(h2h["total"], 1),
+                 "h2h_away_rate": h2h["away_wins"] / max(h2h["total"], 1),
+                 "h2h_total": h2h["total"],
++                "h2h_home_goals_avg": h2h["home_goals_avg"],
++                "h2h_away_goals_avg": h2h["away_goals_avg"],
++                "h2h_btts_rate": h2h["btts_rate"],
+                 "home_injuries": hi, "away_injuries": ai,
+-                "odds_impl_home": odds.impl_home if odds and odds.impl_home else 33.3,
+-                "odds_impl_draw": odds.impl_draw if odds and odds.impl_draw else 33.3,
+-                "odds_impl_away": odds.impl_away if odds and odds.impl_away else 33.3,
+             }
+             return pd.Series(f)
+ 
+-- 
+2.43.0
