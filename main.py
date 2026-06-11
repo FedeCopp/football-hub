@@ -528,13 +528,19 @@ def scrape_transfers(secret: str):
         try:
             from scraper.transfer_scraper import TransferScraper
             scraper = TransferScraper()
-            count = scraper.scrape_all_sources()
-            logger.info(f"Scraping completato: {count} nuove notizie")
+
+            news_count = scraper.scrape_news_sources()
+            logger.info(f"Notizie mercato salvate: {news_count}")
+
             # Processa le notizie con NLP
             from nlp.transfer_analyzer import TransferAnalyzer
             analyzer = TransferAnalyzer()
             processed = analyzer.process_all_unprocessed(limit=200)
             logger.info(f"NLP completato: {processed} transfer aggiornati")
+
+            if settings.API_FOOTBALL_KEY:
+                count = scraper.scrape_all_sources()
+                logger.info(f"Trasferimenti API-Football importati: {count}")
         except Exception as e:
             logger.error(f"Scrape error: {e}")
 
