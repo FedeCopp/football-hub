@@ -16,7 +16,7 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-COMPETITIONS = ["SA", "CL", "PL"]
+COMPETITIONS = ["SA", "CL", "PL", "PD"]
 
 
 def _sync_live_matches():
@@ -62,12 +62,20 @@ def _sync_upcoming_matches():
 
 
 def _scrape_transfers():
-    if not settings.API_FOOTBALL_KEY:
-        return
     try:
         from scraper.transfer_scraper import TransferScraper
-        count = TransferScraper().scrape_all_sources()
-        logger.info(f"[scheduler] Trasferimenti importati: {count}")
+        scraper = TransferScraper()
+
+        news_count = scraper.scrape_news_sources()
+        logger.info(f"[scheduler] Notizie mercato salvate: {news_count}")
+
+        from nlp.transfer_analyzer import transfer_analyzer
+        processed = transfer_analyzer.process_all_unprocessed(limit=200)
+        logger.info(f"[scheduler] Notizie processate (NLP): {processed}")
+
+        if settings.API_FOOTBALL_KEY:
+            count = scraper.scrape_all_sources()
+            logger.info(f"[scheduler] Trasferimenti API-Football importati: {count}")
     except Exception as e:
         logger.error(f"[scheduler] scrape_transfers error: {e}")
 

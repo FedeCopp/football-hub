@@ -31,6 +31,20 @@ def build_llm():
     return ChatOllama(model=settings.OLLAMA_MODEL, base_url=settings.OLLAMA_BASE_URL, temperature=0.1)
 
 
+# Alias per i nomi delle competizioni come restituiti da football-data.org,
+# che spesso non corrispondono al nome comune usato dagli utenti.
+COMPETITION_ALIASES: dict[str, str] = {
+    "la liga": "Primera Division",
+    "liga": "Primera Division",
+    "spagna": "Primera Division",
+    "spagnola": "Primera Division",
+}
+
+
+def _resolve_competition_name(competition: str) -> str:
+    return COMPETITION_ALIASES.get(competition.lower().strip(), competition)
+
+
 def get_system_prompt() -> str:
     now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
     return (
@@ -41,7 +55,7 @@ def get_system_prompt() -> str:
         "3. Non mostrare mai tag XML, function= o simili nel testo.\n"
         "4. Rispondi in italiano.\n"
         f"5. Data attuale: {now}\n\n"
-        "Il database contiene: Serie A, Premier League, Champions League stagioni 2023/24, 2024/25, 2025/26.\n"
+        "Il database contiene: Serie A, Premier League, La Liga, Champions League stagioni 2023/24, 2024/25, 2025/26.\n"
         "Se il database non ha dati per una domanda, dillo chiaramente senza inventare."
     )
 
@@ -66,8 +80,9 @@ def get_matches(days_back: int = 7, days_forward: int = 30, competition: str = "
             Match.kickoff <= date_to,
         )
         if competition:
+            comp_name = _resolve_competition_name(competition)
             query = query.join(Competition).filter(
-                func.lower(Competition.name).contains(competition.lower())
+                func.lower(Competition.name).contains(comp_name.lower())
             )
         matches = query.order_by(Match.kickoff).limit(20).all()
 
@@ -209,12 +224,13 @@ def get_standings(competition: str, season: str = "") -> str:
     season: es. '2025' per stagione 2025/26, lascia vuoto per stagione corrente
     """
     from sqlalchemy import func
+    comp_name = _resolve_competition_name(competition)
     with get_db_session() as db:
         comp = db.query(Competition).filter(
-            func.lower(Competition.name).contains(competition.lower())
+            func.lower(Competition.name).contains(comp_name.lower())
         ).first()
         if not comp:
-            return f"Competizione '{competition}' non trovata. Disponibili: Serie A, Premier League, Champions League."
+            return f"Competizione '{competition}' non trovata. Disponibili: Serie A, Premier League, La Liga, Champions League."
 
         now = datetime.utcnow()
         # Determina stagione

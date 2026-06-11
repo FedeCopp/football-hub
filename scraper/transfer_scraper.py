@@ -1,6 +1,7 @@
 """
 scraper/transfer_scraper.py
-Trasferimenti ufficiali via API-Football con rate limiting corretto.
+Trasferimenti ufficiali via API-Football + notizie/rumors di mercato
+da feed RSS (Gazzetta, TMW, Calciomercato.com), processate poi via NLP.
 """
 import logging
 import time
@@ -8,10 +9,11 @@ from datetime import datetime
 from typing import Optional
 
 import httpx
+from bs4 import BeautifulSoup
 
 from config import settings
 from db.database import get_db_session
-from db.models import Transfer
+from db.models import NewsItem, Transfer
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,18 @@ SOURCE_WEIGHTS = {
     "api_football_confirmed": 3.0,
     "api_football_loan": 2.0,
     "api_football_rumor": 1.5,
+    "gazzetta": 2.0,
+    "tmw": 2.0,
+    "calciomercato": 1.5,
+}
+
+# Feed RSS di notizie calciomercato — usati per popolare NewsItem,
+# poi processati da nlp.transfer_analyzer per estrarre rumors con
+# probabilità e spiegazione.
+RSS_FEEDS = {
+    "gazzetta": "https://www.gazzetta.it/rss/calciomercato.xml",
+    "tmw": "https://www.tuttomercatoweb.com/rss",
+    "calciomercato": "https://www.calciomercato.com/rss",
 }
 CONFIRMATION_PATTERNS = [
     r"official", r"confirmed", r"completed", r"signed",
@@ -73,6 +87,70 @@ class TransferScraper:
 
     def get_team_transfers(self, team_id: int, season: int) -> list:
         return self._get("transfers", {"team": team_id, "season": season})
+
+    # ── Notizie / rumors di mercato (RSS) ──────────────────────
+
+    def scrape_news_sources(self) -> int:
+        """
+        Scarica le ultime notizie di calciomercato dai feed RSS configurati
+        e le salva come NewsItem (in attesa di processing NLP).
+        Restituisce il numero di notizie nuove salvate.
+        """
+        total = 0
+        for source, url in RSS_FEEDS.items():
+            try:
+                total += self._scrape_rss_feed(source, url)
+            except Exception as e:
+                logger.warning(f"Errore scraping feed {source} ({url}): {e}")
+        logger.info(f"Notizie mercato salvate: {total}")
+        return total
+
+    def _scrape_rss_feed(self, source: str, url: str) -> int:
+        headers = {"User-Agent": settings.SCRAPER_USER_AGENT}
+        r = httpx.get(url, headers=headers, timeout=15, follow_redirects=True)
+        r.raise_for_status()
+
+        soup = BeautifulSoup(r.content, "xml")
+        items = soup.find_all("item")
+        count = 0
+
+        for item in items[:30]:
+            title = (item.find("title").get_text(strip=True) if item.find("title") else "")
+            link = (item.find("link").get_text(strip=True) if item.find("link") else "")
+            description = (item.find("description").get_text(strip=True) if item.find("description") else "")
+            pub_date_raw = (item.find("pubDate").get_text(strip=True) if item.find("pubDate") else "")
+
+            if not title or not link:
+                continue
+
+            published = self._parse_rss_date(pub_date_raw)
+
+            with get_db_session() as db:
+                if db.query(NewsItem).filter_by(url=link).first():
+                    continue
+
+                news = NewsItem(
+                    source=source,
+                    title=title,
+                    body=description,
+                    url=link,
+                    published=published,
+                )
+                db.add(news)
+                count += 1
+
+        return count
+
+    @staticmethod
+    def _parse_rss_date(date_str: str) -> datetime:
+        if not date_str:
+            return datetime.utcnow()
+        from email.utils import parsedate_to_datetime
+        try:
+            dt = parsedate_to_datetime(date_str)
+            return dt.replace(tzinfo=None) if dt.tzinfo else dt
+        except (TypeError, ValueError):
+            return datetime.utcnow()
 
     def scrape_all_sources(self) -> int:
         """Scarica trasferimenti per le squadre principali."""

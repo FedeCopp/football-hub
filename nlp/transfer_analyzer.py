@@ -257,6 +257,7 @@ class TransferAnalyzer:
             "tmw":             "TuttoMercatoWeb",
             "calciomercato":   "Calciomercato.com",
             "transfermarkt":   "Transfermarkt",
+            "gazzetta":        "La Gazzetta dello Sport",
         }
         unique = list(set(sources))
         lines.append(f"Fonti: {', '.join(src_names.get(s, s) for s in unique)}.")

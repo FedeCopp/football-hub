@@ -1,0 +1,305 @@
+From 307bff74b7f65aa0f45aff18c858f6d233b16f6d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 11 Jun 2026 09:50:41 +0000
+Subject: [PATCH 1/2] Implementa scraping notizie calciomercato (RSS) per
+ popolare i rumors
+
+Il transfer_scraper esistente usava solo l'endpoint /transfers di
+API-Football (RapidAPI), che sul piano free spesso risponde 403 e
+restituisce sempre 0 risultati: il modulo NLP (transfer_analyzer.py,
+gia' completo) non riceveva mai dati perche' la tabella NewsItem
+restava sempre vuota.
+
+- scraper/transfer_scraper.py: aggiunto scrape_news_sources(), che
+  scarica le ultime notizie di mercato da feed RSS (Gazzetta, TMW,
+  Calciomercato.com) e le salva come NewsItem.
+- nlp/transfer_analyzer.py: aggiunta fonte "gazzetta" alla mappa nomi
+  per le spiegazioni generate.
+- scheduler.py + /api/admin/scrape-transfers: ora eseguono prima lo
+  scraping RSS + processing NLP (calcola probabilita' e spiegazione
+  dei rumors), poi opzionalmente il sync trasferimenti API-Football
+  se la chiave e' configurata.
+
+https://claude.ai/code/session_01AXmPEhmNiDNYzX7STvYGW8
+---
+ main.py                     | 10 ++++-
+ nlp/transfer_analyzer.py    |  1 +
+ scheduler.py                | 16 ++++++--
+ scraper/transfer_scraper.py | 82 ++++++++++++++++++++++++++++++++++++-
+ 4 files changed, 101 insertions(+), 8 deletions(-)
+
+diff --git a/main.py b/main.py
+index 95b10d6..c01a42a 100644
+--- a/main.py
++++ b/main.py
+@@ -528,13 +528,19 @@ def scrape_transfers(secret: str):
+         try:
+             from scraper.transfer_scraper import TransferScraper
+             scraper = TransferScraper()
+-            count = scraper.scrape_all_sources()
+-            logger.info(f"Scraping completato: {count} nuove notizie")
++
++            news_count = scraper.scrape_news_sources()
++            logger.info(f"Notizie mercato salvate: {news_count}")
++
+             # Processa le notizie con NLP
+             from nlp.transfer_analyzer import TransferAnalyzer
+             analyzer = TransferAnalyzer()
+             processed = analyzer.process_all_unprocessed(limit=200)
+             logger.info(f"NLP completato: {processed} transfer aggiornati")
++
++            if settings.API_FOOTBALL_KEY:
++                count = scraper.scrape_all_sources()
++                logger.info(f"Trasferimenti API-Football importati: {count}")
+         except Exception as e:
+             logger.error(f"Scrape error: {e}")
+ 
+diff --git a/nlp/transfer_analyzer.py b/nlp/transfer_analyzer.py
+index c339604..73393c3 100644
+--- a/nlp/transfer_analyzer.py
++++ b/nlp/transfer_analyzer.py
+@@ -257,6 +257,7 @@ class TransferAnalyzer:
+             "tmw":             "TuttoMercatoWeb",
+             "calciomercato":   "Calciomercato.com",
+             "transfermarkt":   "Transfermarkt",
++            "gazzetta":        "La Gazzetta dello Sport",
+         }
+         unique = list(set(sources))
+         lines.append(f"Fonti: {', '.join(src_names.get(s, s) for s in unique)}.")
+diff --git a/scheduler.py b/scheduler.py
+index 8965000..2308e6f 100644
+--- a/scheduler.py
++++ b/scheduler.py
+@@ -62,12 +62,20 @@ def _sync_upcoming_matches():
+ 
+ 
+ def _scrape_transfers():
+-    if not settings.API_FOOTBALL_KEY:
+-        return
+     try:
+         from scraper.transfer_scraper import TransferScraper
+-        count = TransferScraper().scrape_all_sources()
+-        logger.info(f"[scheduler] Trasferimenti importati: {count}")
++        scraper = TransferScraper()
++
++        news_count = scraper.scrape_news_sources()
++        logger.info(f"[scheduler] Notizie mercato salvate: {news_count}")
++
++        from nlp.transfer_analyzer import transfer_analyzer
++        processed = transfer_analyzer.process_all_unprocessed(limit=200)
++        logger.info(f"[scheduler] Notizie processate (NLP): {processed}")
++
++        if settings.API_FOOTBALL_KEY:
++            count = scraper.scrape_all_sources()
++            logger.info(f"[scheduler] Trasferimenti API-Football importati: {count}")
+     except Exception as e:
+         logger.error(f"[scheduler] scrape_transfers error: {e}")
+ 
+diff --git a/scraper/transfer_scraper.py b/scraper/transfer_scraper.py
+index 51e59f1..b157ead 100644
+--- a/scraper/transfer_scraper.py
++++ b/scraper/transfer_scraper.py
+@@ -1,6 +1,7 @@
+ """
+ scraper/transfer_scraper.py
+-Trasferimenti ufficiali via API-Football con rate limiting corretto.
++Trasferimenti ufficiali via API-Football + notizie/rumors di mercato
++da feed RSS (Gazzetta, TMW, Calciomercato.com), processate poi via NLP.
+ """
+ import logging
+ import time
+@@ -8,10 +9,11 @@ from datetime import datetime
+ from typing import Optional
+ 
+ import httpx
++from bs4 import BeautifulSoup
+ 
+ from config import settings
+ from db.database import get_db_session
+-from db.models import Transfer
++from db.models import NewsItem, Transfer
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -22,6 +24,18 @@ SOURCE_WEIGHTS = {
+     "api_football_confirmed": 3.0,
+     "api_football_loan": 2.0,
+     "api_football_rumor": 1.5,
++    "gazzetta": 2.0,
++    "tmw": 2.0,
++    "calciomercato": 1.5,
++}
++
++# Feed RSS di notizie calciomercato — usati per popolare NewsItem,
++# poi processati da nlp.transfer_analyzer per estrarre rumors con
++# probabilità e spiegazione.
++RSS_FEEDS = {
++    "gazzetta": "https://www.gazzetta.it/rss/calciomercato.xml",
++    "tmw": "https://www.tuttomercatoweb.com/rss",
++    "calciomercato": "https://www.calciomercato.com/rss",
+ }
+ CONFIRMATION_PATTERNS = [
+     r"official", r"confirmed", r"completed", r"signed",
+@@ -74,6 +88,70 @@ class TransferScraper:
+     def get_team_transfers(self, team_id: int, season: int) -> list:
+         return self._get("transfers", {"team": team_id, "season": season})
+ 
++    # ── Notizie / rumors di mercato (RSS) ──────────────────────
++
++    def scrape_news_sources(self) -> int:
++        """
++        Scarica le ultime notizie di calciomercato dai feed RSS configurati
++        e le salva come NewsItem (in attesa di processing NLP).
++        Restituisce il numero di notizie nuove salvate.
++        """
++        total = 0
++        for source, url in RSS_FEEDS.items():
++            try:
++                total += self._scrape_rss_feed(source, url)
++            except Exception as e:
++                logger.warning(f"Errore scraping feed {source} ({url}): {e}")
++        logger.info(f"Notizie mercato salvate: {total}")
++        return total
++
++    def _scrape_rss_feed(self, source: str, url: str) -> int:
++        headers = {"User-Agent": settings.SCRAPER_USER_AGENT}
++        r = httpx.get(url, headers=headers, timeout=15, follow_redirects=True)
++        r.raise_for_status()
++
++        soup = BeautifulSoup(r.content, "xml")
++        items = soup.find_all("item")
++        count = 0
++
++        for item in items[:30]:
++            title = (item.find("title").get_text(strip=True) if item.find("title") else "")
++            link = (item.find("link").get_text(strip=True) if item.find("link") else "")
++            description = (item.find("description").get_text(strip=True) if item.find("description") else "")
++            pub_date_raw = (item.find("pubDate").get_text(strip=True) if item.find("pubDate") else "")
++
++            if not title or not link:
++                continue
++
++            published = self._parse_rss_date(pub_date_raw)
++
++            with get_db_session() as db:
++                if db.query(NewsItem).filter_by(url=link).first():
++                    continue
++
++                news = NewsItem(
++                    source=source,
++                    title=title,
++                    body=description,
++                    url=link,
++                    published=published,
++                )
++                db.add(news)
++                count += 1
++
++        return count
++
++    @staticmethod
++    def _parse_rss_date(date_str: str) -> datetime:
++        if not date_str:
++            return datetime.utcnow()
++        from email.utils import parsedate_to_datetime
++        try:
++            dt = parsedate_to_datetime(date_str)
++            return dt.replace(tzinfo=None) if dt.tzinfo else dt
++        except (TypeError, ValueError):
++            return datetime.utcnow()
++
+     def scrape_all_sources(self) -> int:
+         """Scarica trasferimenti per le squadre principali."""
+         if not settings.API_FOOTBALL_KEY:
+-- 
+2.43.0
+
+
+From 859b8219e24b5e263967ca3b99516933c25353de Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 11 Jun 2026 09:55:30 +0000
+Subject: [PATCH 2/2] Aggiungi La Liga al sync e al chatbot per
+ classifica/partite
+
+---
+ chatbot/agent.py | 24 ++++++++++++++++++++----
+ scheduler.py     |  2 +-
+ 2 files changed, 21 insertions(+), 5 deletions(-)
+
+diff --git a/chatbot/agent.py b/chatbot/agent.py
+index 273b9e8..523e4d6 100644
+--- a/chatbot/agent.py
++++ b/chatbot/agent.py
+@@ -31,6 +31,20 @@ def build_llm():
+     return ChatOllama(model=settings.OLLAMA_MODEL, base_url=settings.OLLAMA_BASE_URL, temperature=0.1)
+ 
+ 
++# Alias per i nomi delle competizioni come restituiti da football-data.org,
++# che spesso non corrispondono al nome comune usato dagli utenti.
++COMPETITION_ALIASES: dict[str, str] = {
++    "la liga": "Primera Division",
++    "liga": "Primera Division",
++    "spagna": "Primera Division",
++    "spagnola": "Primera Division",
++}
++
++
++def _resolve_competition_name(competition: str) -> str:
++    return COMPETITION_ALIASES.get(competition.lower().strip(), competition)
++
++
+ def get_system_prompt() -> str:
+     now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+     return (
+@@ -41,7 +55,7 @@ def get_system_prompt() -> str:
+         "3. Non mostrare mai tag XML, function= o simili nel testo.\n"
+         "4. Rispondi in italiano.\n"
+         f"5. Data attuale: {now}\n\n"
+-        "Il database contiene: Serie A, Premier League, Champions League stagioni 2023/24, 2024/25, 2025/26.\n"
++        "Il database contiene: Serie A, Premier League, La Liga, Champions League stagioni 2023/24, 2024/25, 2025/26.\n"
+         "Se il database non ha dati per una domanda, dillo chiaramente senza inventare."
+     )
+ 
+@@ -66,8 +80,9 @@ def get_matches(days_back: int = 7, days_forward: int = 30, competition: str = "
+             Match.kickoff <= date_to,
+         )
+         if competition:
++            comp_name = _resolve_competition_name(competition)
+             query = query.join(Competition).filter(
+-                func.lower(Competition.name).contains(competition.lower())
++                func.lower(Competition.name).contains(comp_name.lower())
+             )
+         matches = query.order_by(Match.kickoff).limit(20).all()
+ 
+@@ -209,12 +224,13 @@ def get_standings(competition: str, season: str = "") -> str:
+     season: es. '2025' per stagione 2025/26, lascia vuoto per stagione corrente
+     """
+     from sqlalchemy import func
++    comp_name = _resolve_competition_name(competition)
+     with get_db_session() as db:
+         comp = db.query(Competition).filter(
+-            func.lower(Competition.name).contains(competition.lower())
++            func.lower(Competition.name).contains(comp_name.lower())
+         ).first()
+         if not comp:
+-            return f"Competizione '{competition}' non trovata. Disponibili: Serie A, Premier League, Champions League."
++            return f"Competizione '{competition}' non trovata. Disponibili: Serie A, Premier League, La Liga, Champions League."
+ 
+         now = datetime.utcnow()
+         # Determina stagione
+diff --git a/scheduler.py b/scheduler.py
+index 2308e6f..a3e6788 100644
+--- a/scheduler.py
++++ b/scheduler.py
+@@ -16,7 +16,7 @@ from config import settings
+ 
+ logger = logging.getLogger(__name__)
+ 
+-COMPETITIONS = ["SA", "CL", "PL"]
++COMPETITIONS = ["SA", "CL", "PL", "PD"]
+ 
+ 
+ def _sync_live_matches():
+-- 
+2.43.0
+
